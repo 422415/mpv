@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <assert.h>
 
 #include "config.h"
@@ -37,11 +38,16 @@
 #include "video/out/bitmap_packer.h"
 #include "video/mp_image.h"
 
+#define ASS_ATLAS_INITIAL_SIZE 1024
+#define ASS_ATLAS_MAX_DIM 16384
+#define ASS_ATLAS_MAX_REFS 4096
+
 struct packed_ass_ref {
     void *bitmap;
     int stride;
     int w, h;
     uint32_t color;
+    uint64_t bitmap_hash;
     float blur_x, blur_y;
     int src_x, src_y;
 };
@@ -50,6 +56,12 @@ struct mp_sub_packer {
     struct sub_bitmap *cached_parts; // only for the array memory
     struct packed_ass_ref *cached_ass_refs;
     int num_cached_ass_refs;
+    struct packed_ass_ref *ass_atlas_refs;
+    int num_ass_atlas_refs;
+    struct mp_image *ass_atlas_img;
+    int ass_atlas_w, ass_atlas_h;
+    int ass_atlas_used_w, ass_atlas_used_h;
+    int ass_atlas_x, ass_atlas_y, ass_atlas_row_h;
     struct sub_bitmap *cached_subrandr_images;
     struct mp_image *cached_img;
     struct sub_bitmaps cached_subs;
@@ -57,6 +69,8 @@ struct mp_sub_packer {
     struct sub_bitmap rgba_imgs[MP_SUB_BB_LIST_MAX];
     struct bitmap_packer *packer;
 };
+
+static void fill_padding_1(uint8_t *base, int w, int h, int stride, int padding);
 
 // Free with talloc_free().
 struct mp_sub_packer *mp_sub_packer_alloc(void *ta_parent)
@@ -121,6 +135,226 @@ static bool ass_ref_matches(struct packed_ass_ref *ref, struct sub_bitmap *b)
            ref->color == b->libass.color &&
            ref->blur_x == b->libass.blur_x &&
            ref->blur_y == b->libass.blur_y;
+}
+
+static uint64_t ass_bitmap_hash(struct sub_bitmap *b)
+{
+    uint64_t h = 1469598103934665603ULL;
+    uint8_t *src = b->bitmap;
+
+    for (int y = 0; y < b->h; y++) {
+        for (int x = 0; x < b->w; x++) {
+            h ^= src[x];
+            h *= 1099511628211ULL;
+        }
+        src += b->stride;
+    }
+
+    return h;
+}
+
+static bool ass_atlas_ref_matches(struct packed_ass_ref *ref,
+                                  struct sub_bitmap *b, uint64_t hash)
+{
+    return ref->w == b->w && ref->h == b->h &&
+           ref->bitmap_hash == hash &&
+           ref->blur_x == b->libass.blur_x &&
+           ref->blur_y == b->libass.blur_y;
+}
+
+static int next_pow2_limit(int v, int limit)
+{
+    int r = 1;
+    while (r < v && r < limit)
+        r *= 2;
+    return r >= v ? r : 0;
+}
+
+static void reset_ass_atlas(struct mp_sub_packer *p)
+{
+    p->num_ass_atlas_refs = 0;
+    p->ass_atlas_w = p->ass_atlas_h = 0;
+    p->ass_atlas_used_w = p->ass_atlas_used_h = 0;
+    p->ass_atlas_x = p->ass_atlas_y = p->ass_atlas_row_h = 0;
+    talloc_free(p->ass_atlas_img);
+    p->ass_atlas_img = NULL;
+}
+
+static bool ensure_ass_atlas_img(struct mp_sub_packer *p, int want_w, int want_h)
+{
+    if (want_w > ASS_ATLAS_MAX_DIM || want_h > ASS_ATLAS_MAX_DIM)
+        return false;
+
+    int new_w = p->ass_atlas_w ? p->ass_atlas_w : ASS_ATLAS_INITIAL_SIZE;
+    int new_h = p->ass_atlas_h ? p->ass_atlas_h : ASS_ATLAS_INITIAL_SIZE;
+    new_w = next_pow2_limit(MPMAX(new_w, want_w), ASS_ATLAS_MAX_DIM);
+    new_h = next_pow2_limit(MPMAX(new_h, want_h), ASS_ATLAS_MAX_DIM);
+    if (!new_w || !new_h)
+        return false;
+
+    if (p->ass_atlas_img && p->ass_atlas_img->w >= new_w &&
+        p->ass_atlas_img->h >= new_h && p->ass_atlas_img->imgfmt == IMGFMT_Y8)
+        return mp_image_make_writeable(p->ass_atlas_img);
+
+    struct mp_image *old = p->ass_atlas_img;
+    struct mp_image *img = mp_image_alloc(IMGFMT_Y8, new_w, new_h);
+    if (!img)
+        return false;
+    talloc_steal(p, img);
+
+    if (old) {
+        int copy_w = MPMIN(old->w, img->w);
+        int copy_h = MPMIN(old->h, img->h);
+        memcpy_pic(img->planes[0], old->planes[0], copy_w, copy_h,
+                   img->stride[0], old->stride[0]);
+        talloc_free(old);
+    }
+
+    p->ass_atlas_img = img;
+    p->ass_atlas_w = img->w;
+    p->ass_atlas_h = img->h;
+    return mp_image_make_writeable(p->ass_atlas_img);
+}
+
+static int find_ass_atlas_ref(struct mp_sub_packer *p, struct sub_bitmap *b,
+                              uint64_t hash)
+{
+    for (int n = 0; n < p->num_ass_atlas_refs; n++) {
+        if (ass_atlas_ref_matches(&p->ass_atlas_refs[n], b, hash))
+            return n;
+    }
+    return -1;
+}
+
+static bool alloc_ass_atlas_rect(struct mp_sub_packer *p, int w, int h,
+                                 int *out_x, int *out_y)
+{
+    int padding = p->packer->padding;
+    int rw = w + padding * 2;
+    int rh = h + padding * 2;
+    if (rw <= 0 || rh <= 0 || rw > ASS_ATLAS_MAX_DIM || rh > ASS_ATLAS_MAX_DIM)
+        return false;
+
+    int want_w = p->ass_atlas_w ? p->ass_atlas_w : ASS_ATLAS_INITIAL_SIZE;
+    want_w = MPMAX(want_w, rw);
+    want_w = next_pow2_limit(want_w, ASS_ATLAS_MAX_DIM);
+    if (!want_w)
+        return false;
+
+    if (!p->ass_atlas_w) {
+        if (!ensure_ass_atlas_img(p, want_w, MPMAX(rh, ASS_ATLAS_INITIAL_SIZE)))
+            return false;
+    } else if (rw > p->ass_atlas_w) {
+        if (!ensure_ass_atlas_img(p, want_w, p->ass_atlas_h))
+            return false;
+    }
+
+    if (p->ass_atlas_x + rw > p->ass_atlas_w) {
+        p->ass_atlas_x = 0;
+        p->ass_atlas_y += p->ass_atlas_row_h;
+        p->ass_atlas_row_h = 0;
+    }
+
+    int want_h = p->ass_atlas_y + rh;
+    if (want_h > p->ass_atlas_h &&
+        !ensure_ass_atlas_img(p, p->ass_atlas_w, want_h))
+        return false;
+
+    *out_x = p->ass_atlas_x + padding;
+    *out_y = p->ass_atlas_y + padding;
+    p->ass_atlas_x += rw;
+    p->ass_atlas_row_h = MPMAX(p->ass_atlas_row_h, rh);
+    p->ass_atlas_used_w = MPMAX(p->ass_atlas_used_w, p->ass_atlas_x);
+    p->ass_atlas_used_h = MPMAX(p->ass_atlas_used_h, p->ass_atlas_y + rh);
+    return true;
+}
+
+static bool cache_ass_bitmap(struct mp_sub_packer *p, struct sub_bitmap *b,
+                             struct packed_ass_ref *ref)
+{
+    uint8_t *base = p->ass_atlas_img->planes[0];
+    int stride = p->ass_atlas_img->stride[0];
+    void *pdata = base + ref->src_y * stride + ref->src_x;
+    memcpy_pic(pdata, b->bitmap, b->w, b->h, stride, b->stride);
+    fill_padding_1(pdata, b->w, b->h, stride, p->packer->padding);
+    return true;
+}
+
+static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
+                               bool *content_changed)
+{
+    if (res->num_parts > ASS_ATLAS_MAX_REFS ||
+        p->num_ass_atlas_refs > ASS_ATLAS_MAX_REFS)
+    {
+        reset_ass_atlas(p);
+        return false;
+    }
+
+    *content_changed = false;
+
+    for (int n = 0; n < res->num_parts; n++) {
+        struct sub_bitmap *b = &res->parts[n];
+        uint64_t hash = ass_bitmap_hash(b);
+        int idx = find_ass_atlas_ref(p, b, hash);
+        if (idx >= 0)
+            continue;
+
+        if (p->num_ass_atlas_refs >= ASS_ATLAS_MAX_REFS) {
+            reset_ass_atlas(p);
+            return false;
+        }
+
+        int src_x, src_y;
+        if (!alloc_ass_atlas_rect(p, b->w, b->h, &src_x, &src_y)) {
+            reset_ass_atlas(p);
+            return false;
+        }
+
+        MP_TARRAY_GROW(p, p->ass_atlas_refs, p->num_ass_atlas_refs);
+        struct packed_ass_ref *ref = &p->ass_atlas_refs[p->num_ass_atlas_refs++];
+        *ref = (struct packed_ass_ref){
+            .bitmap = b->bitmap,
+            .stride = b->stride,
+            .w = b->w,
+            .h = b->h,
+            .color = b->libass.color,
+            .bitmap_hash = hash,
+            .blur_x = b->libass.blur_x,
+            .blur_y = b->libass.blur_y,
+            .src_x = src_x,
+            .src_y = src_y,
+        };
+        if (!cache_ass_bitmap(p, b, ref)) {
+            reset_ass_atlas(p);
+            return false;
+        }
+        *content_changed = true;
+    }
+
+    if (!p->ass_atlas_img)
+        return false;
+
+    res->packed = p->ass_atlas_img;
+    res->packed_w = p->ass_atlas_used_w;
+    res->packed_h = p->ass_atlas_used_h;
+
+    uint8_t *base = res->packed->planes[0];
+    int stride = res->packed->stride[0];
+    for (int n = 0; n < res->num_parts; n++) {
+        struct sub_bitmap *b = &res->parts[n];
+        uint64_t hash = ass_bitmap_hash(b);
+        int idx = find_ass_atlas_ref(p, b, hash);
+        if (idx < 0)
+            return false;
+
+        struct packed_ass_ref *ref = &p->ass_atlas_refs[idx];
+        b->src_x = ref->src_x;
+        b->src_y = ref->src_y;
+        b->bitmap = base + b->src_y * stride + b->src_x;
+        b->stride = stride;
+    }
+
+    return true;
 }
 
 static void save_ass_source_refs(struct mp_sub_packer *p,
@@ -401,10 +635,20 @@ void mp_sub_packer_pack_ass(struct mp_sub_packer *p, ASS_Image **image_lists,
     }
 
     p->cached_subs_valid = false;
-    if (format == SUBBITMAP_LIBASS)
+    if (format == SUBBITMAP_LIBASS) {
+        bool content_changed = false;
+        if (pack_libass_cached(p, &res, &content_changed)) {
+            res.change_id = content_changed ? 1 : 0;
+            *out = res;
+            p->cached_subs = res;
+            p->cached_subs.change_id = 0;
+            p->cached_subs_valid = true;
+            return;
+        }
         save_ass_source_refs(p, &res);
-    else
+    } else {
         p->num_cached_ass_refs = 0;
+    }
 
     bool r = false;
     if (format == SUBBITMAP_BGRA) {
