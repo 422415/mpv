@@ -36,11 +36,13 @@ static const char osd_font_pfb[] =
 #include "sub/packer.h"
 #include "options/options.h"
 
+#define ASS_CHANGE_POSITION 1
+#define ASS_CHANGE_CONTENT 2
 
 #define ASS_USE_OSD_FONT "{\\fnmpv-osd-symbols}"
 
 static void append_ass(struct ass_state *ass, struct mp_osd_res *res,
-                       ASS_Image **img_list, bool *changed);
+                       ASS_Image **img_list, int *changed);
 
 static void create_ass_renderer(struct osd_state *osd, struct ass_state *ass)
 {
@@ -587,7 +589,7 @@ void osd_set_external(struct osd_state *osd, struct osd_external_ass *ov)
 
     if (!ov->format) {
         if (!entry->ov.hidden) {
-            obj->changed = true;
+            obj->changed = ASS_CHANGE_CONTENT;
             osd->want_redraw_notification = true;
         }
         destroy_external(entry);
@@ -596,7 +598,7 @@ void osd_set_external(struct osd_state *osd, struct osd_external_ass *ov)
     }
 
     if (!entry->ov.hidden || !ov->hidden) {
-        obj->changed = true;
+        obj->changed = ASS_CHANGE_CONTENT;
         osd->want_redraw_notification = true;
     }
 
@@ -653,7 +655,7 @@ void osd_set_external_remove_owner(struct osd_state *osd, void *owner)
         if (e->ov.owner == owner) {
             destroy_external(e);
             MP_TARRAY_REMOVE_AT(obj->externals, obj->num_externals, n);
-            obj->changed = true;
+            obj->changed = ASS_CHANGE_CONTENT;
             osd->want_redraw_notification = true;
         }
     }
@@ -661,7 +663,7 @@ void osd_set_external_remove_owner(struct osd_state *osd, void *owner)
 }
 
 static void append_ass(struct ass_state *ass, struct mp_osd_res *res,
-                       ASS_Image **img_list, bool *changed)
+                       ASS_Image **img_list, int *changed)
 {
     if (!ass->render || !ass->track) {
         *img_list = NULL;
@@ -676,11 +678,11 @@ static void append_ass(struct ass_state *ass, struct mp_osd_res *res,
     int ass_changed;
     *img_list = ass_render_frame(ass->render, ass->track, 0, &ass_changed);
 
-    ass->changed |= ass_changed;
+    ass->changed = MPMAX(ass->changed, ass_changed);
 
     if (changed) {
-        *changed |= ass->changed;
-        ass->changed = false;
+        *changed = MPMAX(*changed, ass->changed);
+        ass->changed = 0;
     }
 }
 
@@ -715,9 +717,9 @@ struct sub_bitmaps *osd_object_get_bitmaps(struct osd_state *osd,
 done:;
     struct sub_bitmaps out_imgs = {0};
     mp_sub_packer_pack_ass(obj->sub_packer, obj->ass_imgs, obj->num_externals + 1,
-                       obj->changed ? 2 : 0, false, format, &out_imgs);
+                       obj->changed, false, format, &out_imgs);
 
-    obj->changed = false;
+    obj->changed = 0;
 
     return sub_bitmaps_copy(&obj->copy_cache, &out_imgs);
 }

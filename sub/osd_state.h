@@ -24,7 +24,8 @@ struct ass_state {
     struct ass_renderer *render;
     struct ass_library *library;
     int res_x, res_y;
-    bool changed;
+    // libass change code: 0 unchanged, 1 position-only, 2 content changed.
+    int changed;
     struct mp_osd_res vo_res; // last known value
 };
 
@@ -53,7 +54,8 @@ struct osd_object {
     bool vo_had_output;
 
     // Internally used by osd_libass.c
-    bool changed;
+    // libass change code: 0 unchanged, 1 position-only, 2 content changed.
+    int changed;
     struct ass_state ass;
     struct mp_sub_packer *sub_packer;
     struct sub_bitmap_copy_cache *copy_cache;
