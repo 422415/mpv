@@ -153,13 +153,26 @@ static uint64_t ass_bitmap_hash(struct sub_bitmap *b)
     return h;
 }
 
-static bool ass_atlas_ref_matches(struct packed_ass_ref *ref,
+static bool ass_atlas_ref_matches(struct mp_sub_packer *p, struct packed_ass_ref *ref,
                                   struct sub_bitmap *b, uint64_t hash)
 {
-    return ref->w == b->w && ref->h == b->h &&
-           ref->bitmap_hash == hash &&
-           ref->blur_x == b->libass.blur_x &&
-           ref->blur_y == b->libass.blur_y;
+    if (ref->w != b->w || ref->h != b->h ||
+        ref->bitmap_hash != hash ||
+        ref->blur_x != b->libass.blur_x ||
+        ref->blur_y != b->libass.blur_y ||
+        !p->ass_atlas_img)
+        return false;
+
+    uint8_t *src = b->bitmap;
+    uint8_t *dst = p->ass_atlas_img->planes[0] +
+                   ref->src_y * p->ass_atlas_img->stride[0] + ref->src_x;
+    for (int y = 0; y < b->h; y++) {
+        if (memcmp(src, dst, b->w) != 0)
+            return false;
+        src += b->stride;
+        dst += p->ass_atlas_img->stride[0];
+    }
+    return true;
 }
 
 static int next_pow2_limit(int v, int limit)
@@ -220,7 +233,7 @@ static int find_ass_atlas_ref(struct mp_sub_packer *p, struct sub_bitmap *b,
                               uint64_t hash)
 {
     for (int n = 0; n < p->num_ass_atlas_refs; n++) {
-        if (ass_atlas_ref_matches(&p->ass_atlas_refs[n], b, hash))
+        if (ass_atlas_ref_matches(p, &p->ass_atlas_refs[n], b, hash))
             return n;
     }
     return -1;
