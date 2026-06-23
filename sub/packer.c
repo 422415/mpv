@@ -37,8 +37,19 @@
 #include "video/out/bitmap_packer.h"
 #include "video/mp_image.h"
 
+struct packed_ass_ref {
+    void *bitmap;
+    int stride;
+    int w, h;
+    uint32_t color;
+    float blur_x, blur_y;
+    int src_x, src_y;
+};
+
 struct mp_sub_packer {
     struct sub_bitmap *cached_parts; // only for the array memory
+    struct packed_ass_ref *cached_ass_refs;
+    int num_cached_ass_refs;
     struct sub_bitmap *cached_subrandr_images;
     struct mp_image *cached_img;
     struct sub_bitmaps cached_subs;
@@ -98,6 +109,74 @@ static bool pack(struct mp_sub_packer *p, struct sub_bitmaps *res, int imgfmt)
 
         b->src_x = pos.x;
         b->src_y = pos.y;
+    }
+
+    return true;
+}
+
+static bool ass_ref_matches(struct packed_ass_ref *ref, struct sub_bitmap *b)
+{
+    return ref->bitmap == b->bitmap && ref->stride == b->stride &&
+           ref->w == b->w && ref->h == b->h &&
+           ref->color == b->libass.color &&
+           ref->blur_x == b->libass.blur_x &&
+           ref->blur_y == b->libass.blur_y;
+}
+
+static void save_ass_source_refs(struct mp_sub_packer *p,
+                                 struct sub_bitmaps *res)
+{
+    MP_TARRAY_GROW(p, p->cached_ass_refs, res->num_parts);
+    p->num_cached_ass_refs = res->num_parts;
+
+    for (int n = 0; n < res->num_parts; n++) {
+        struct sub_bitmap *b = &res->parts[n];
+        p->cached_ass_refs[n] = (struct packed_ass_ref){
+            .bitmap = b->bitmap,
+            .stride = b->stride,
+            .w = b->w,
+            .h = b->h,
+            .color = b->libass.color,
+            .blur_x = b->libass.blur_x,
+            .blur_y = b->libass.blur_y,
+        };
+    }
+}
+
+static void save_ass_packed_positions(struct mp_sub_packer *p,
+                                      struct sub_bitmaps *res)
+{
+    for (int n = 0; n < res->num_parts && n < p->num_cached_ass_refs; n++) {
+        p->cached_ass_refs[n].src_x = res->parts[n].src_x;
+        p->cached_ass_refs[n].src_y = res->parts[n].src_y;
+    }
+}
+
+static bool reuse_ass_packing(struct mp_sub_packer *p, struct sub_bitmaps *res,
+                              int format)
+{
+    if (format != SUBBITMAP_LIBASS || !p->cached_subs_valid ||
+        p->cached_subs.format != SUBBITMAP_LIBASS || !p->cached_subs.packed ||
+        p->num_cached_ass_refs != res->num_parts)
+        return false;
+
+    for (int n = 0; n < res->num_parts; n++) {
+        if (!ass_ref_matches(&p->cached_ass_refs[n], &res->parts[n]))
+            return false;
+    }
+
+    res->packed = p->cached_subs.packed;
+    res->packed_w = p->cached_subs.packed_w;
+    res->packed_h = p->cached_subs.packed_h;
+
+    uint8_t *base = res->packed->planes[0];
+    int stride = res->packed->stride[0];
+    for (int n = 0; n < res->num_parts; n++) {
+        struct sub_bitmap *b = &res->parts[n];
+        b->src_x = p->cached_ass_refs[n].src_x;
+        b->src_y = p->cached_ass_refs[n].src_y;
+        b->bitmap = base + b->src_y * stride + b->src_x;
+        b->stride = stride;
     }
 
     return true;
@@ -265,17 +344,18 @@ static bool pack_rgba(struct mp_sub_packer *p, struct sub_bitmaps *res)
 
 // Pack the contents of image_lists[0] to image_lists[num_image_lists-1] into
 // a single image, and make *out point to it. *out is completely overwritten.
-// If libass reported any change, image_lists_changed must be set (it then
-// repacks all images). preferred_osd_format can be set to a desired
-// sub_bitmap_format. Currently, only SUBBITMAP_LIBASS is supported.
+// If libass reports only position changes, keep the old atlas and update only
+// destination coordinates. A full repack is needed only for content changes.
+// preferred_osd_format can be set to a desired sub_bitmap_format. Currently,
+// only SUBBITMAP_LIBASS is supported for position-only reuse.
 void mp_sub_packer_pack_ass(struct mp_sub_packer *p, ASS_Image **image_lists,
-                        int num_image_lists, bool image_lists_changed, bool video_color_space,
+                        int num_image_lists, int image_lists_changed, bool video_color_space,
                         int preferred_osd_format, struct sub_bitmaps *out)
 {
     int format = preferred_osd_format == SUBBITMAP_BGRA ? SUBBITMAP_BGRA
                                                         : SUBBITMAP_LIBASS;
 
-    if (p->cached_subs_valid && !image_lists_changed &&
+    if (p->cached_subs_valid && image_lists_changed == 0 &&
         p->cached_subs.format == format)
     {
         *out = p->cached_subs;
@@ -283,10 +363,9 @@ void mp_sub_packer_pack_ass(struct mp_sub_packer *p, ASS_Image **image_lists,
     }
 
     *out = (struct sub_bitmaps){.change_id = 1};
-    p->cached_subs_valid = false;
 
     struct sub_bitmaps res = {
-        .change_id = image_lists_changed,
+        .change_id = 1,
         .format = SUBBITMAP_LIBASS,
         .parts = p->cached_parts,
         .video_color_space = video_color_space,
@@ -312,6 +391,21 @@ void mp_sub_packer_pack_ass(struct mp_sub_packer *p, ASS_Image **image_lists,
         }
     }
 
+    if (image_lists_changed == 1 && reuse_ass_packing(p, &res, format)) {
+        res.change_id = 0;
+        *out = res;
+        p->cached_subs = res;
+        p->cached_subs.change_id = 0;
+        p->cached_subs_valid = true;
+        return;
+    }
+
+    p->cached_subs_valid = false;
+    if (format == SUBBITMAP_LIBASS)
+        save_ass_source_refs(p, &res);
+    else
+        p->num_cached_ass_refs = 0;
+
     bool r = false;
     if (format == SUBBITMAP_BGRA) {
         r = pack_rgba(p, &res);
@@ -321,6 +415,9 @@ void mp_sub_packer_pack_ass(struct mp_sub_packer *p, ASS_Image **image_lists,
 
     if (!r)
         return;
+
+    if (format == SUBBITMAP_LIBASS)
+        save_ass_packed_positions(p, &res);
 
     *out = res;
     p->cached_subs = res;
