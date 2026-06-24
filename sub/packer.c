@@ -149,7 +149,14 @@ static uint64_t ass_bitmap_hash(struct sub_bitmap *b)
     uint8_t *src = b->bitmap;
 
     for (int y = 0; y < b->h; y++) {
-        for (int x = 0; x < b->w; x++) {
+        int x = 0;
+        for (; x + 8 <= b->w; x += 8) {
+            uint64_t word;
+            memcpy(&word, src + x, sizeof(word));
+            h ^= word;
+            h *= 1099511628211ULL;
+        }
+        for (; x < b->w; x++) {
             h ^= src[x];
             h *= 1099511628211ULL;
         }
