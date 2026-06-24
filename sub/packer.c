@@ -58,6 +58,7 @@ struct mp_sub_packer {
     int num_cached_ass_refs;
     struct packed_ass_ref *ass_atlas_refs;
     int num_ass_atlas_refs;
+    int *ass_atlas_indices;
     struct sub_bitmap_dirty_rect *ass_atlas_dirty;
     int num_ass_atlas_dirty;
     struct mp_image *ass_atlas_img;
@@ -338,13 +339,16 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
 
     *content_changed = false;
     p->num_ass_atlas_dirty = 0;
+    MP_TARRAY_GROW(p, p->ass_atlas_indices, res->num_parts);
 
     for (int n = 0; n < res->num_parts; n++) {
         struct sub_bitmap *b = &res->parts[n];
         uint64_t hash = ass_bitmap_hash(b);
         int idx = find_ass_atlas_ref(p, b, hash);
-        if (idx >= 0)
+        if (idx >= 0) {
+            p->ass_atlas_indices[n] = idx;
             continue;
+        }
 
         if (p->num_ass_atlas_refs >= ASS_ATLAS_MAX_REFS) {
             reset_ass_atlas(p);
@@ -358,7 +362,8 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
         }
 
         MP_TARRAY_GROW(p, p->ass_atlas_refs, p->num_ass_atlas_refs);
-        struct packed_ass_ref *ref = &p->ass_atlas_refs[p->num_ass_atlas_refs++];
+        idx = p->num_ass_atlas_refs++;
+        struct packed_ass_ref *ref = &p->ass_atlas_refs[idx];
         *ref = (struct packed_ass_ref){
             .bitmap = b->bitmap,
             .stride = b->stride,
@@ -375,6 +380,7 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
             reset_ass_atlas(p);
             return false;
         }
+        p->ass_atlas_indices[n] = idx;
         *content_changed = true;
     }
 
@@ -391,9 +397,8 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
     int stride = res->packed->stride[0];
     for (int n = 0; n < res->num_parts; n++) {
         struct sub_bitmap *b = &res->parts[n];
-        uint64_t hash = ass_bitmap_hash(b);
-        int idx = find_ass_atlas_ref(p, b, hash);
-        if (idx < 0)
+        int idx = p->ass_atlas_indices[n];
+        if (idx < 0 || idx >= p->num_ass_atlas_refs)
             return false;
 
         struct packed_ass_ref *ref = &p->ass_atlas_refs[idx];
