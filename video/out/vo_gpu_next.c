@@ -479,76 +479,6 @@ static bool upload_osd_rects(struct vo *vo, const struct sub_bitmaps *item,
     struct priv *p = vo->priv;
     int stride = item->packed->stride[0];
     uint8_t *base = item->packed->planes[0];
-    void *tmp = talloc_new(NULL);
-    size_t *offsets = talloc_array(tmp, size_t, num_rects);
-    uint8_t *upload_data = NULL;
-    size_t upload_size = 0;
-
-    if (!tmp || (num_rects > 0 && !offsets)) {
-        talloc_free(tmp);
-        return false;
-    }
-
-    for (int n = 0; n < num_rects; n++) {
-        const struct sub_bitmap_dirty_rect *dirty = &rects[n];
-        int x0 = MPCLAMP(dirty->x0, 0, item->packed->w);
-        int y0 = MPCLAMP(dirty->y0, 0, item->packed->h);
-        int x1 = MPCLAMP(dirty->x1, 0, item->packed->w);
-        int y1 = MPCLAMP(dirty->y1, 0, item->packed->h);
-        offsets[n] = upload_size;
-        if (x0 >= x1 || y0 >= y1)
-            continue;
-
-        upload_size += (size_t)(x1 - x0) * (y1 - y0);
-    }
-
-    if (upload_size) {
-        upload_data = talloc_size(tmp, upload_size);
-        if (!upload_data) {
-            talloc_free(tmp);
-            return false;
-        }
-    }
-
-    size_t pos = 0;
-    for (int n = 0; n < num_rects; n++) {
-        const struct sub_bitmap_dirty_rect *dirty = &rects[n];
-        int x0 = MPCLAMP(dirty->x0, 0, item->packed->w);
-        int y0 = MPCLAMP(dirty->y0, 0, item->packed->h);
-        int x1 = MPCLAMP(dirty->x1, 0, item->packed->w);
-        int y1 = MPCLAMP(dirty->y1, 0, item->packed->h);
-        if (x0 >= x1 || y0 >= y1)
-            continue;
-
-        int w = x1 - x0;
-        int h = y1 - y0;
-        offsets[n] = pos;
-        uint8_t *dst = upload_data + pos;
-        uint8_t *src = base + (ptrdiff_t)y0 * stride + x0;
-        for (int y = 0; y < h; y++)
-            memcpy(dst + (size_t)y * w, src + (ptrdiff_t)y * stride, w);
-        pos += (size_t)w * h;
-        *dirty_area += (int64_t)w * h;
-    }
-
-    pl_buf *ring = NULL;
-    bool use_buf = upload_size > 0;
-    if (use_buf) {
-        ring = &p->overlay_bufs[p->overlay_buf_idx++ % NUM_OVERLAY_BUFS];
-        bool buf_ok = (*ring) && (*ring)->params.size >= upload_size;
-        if (!buf_ok) {
-            size_t want = (upload_size + (4u << 20) - 1) &
-                          ~(size_t)((4u << 20) - 1);
-            buf_ok = pl_buf_recreate(p->gpu, ring,
-                                     pl_buf_params(.size = want,
-                                                   .host_writable = true));
-        }
-        if (buf_ok) {
-            pl_buf_write(p->gpu, *ring, 0, upload_data, upload_size);
-        } else {
-            use_buf = false;
-        }
-    }
 
     for (int n = 0; n < num_rects; n++) {
         const struct sub_bitmap_dirty_rect *dirty = &rects[n];
@@ -562,15 +492,10 @@ static bool upload_osd_rects(struct vo *vo, const struct sub_bitmaps *item,
         struct pl_tex_transfer_params upload_params = {
             .tex        = tex,
             .rc         = { .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 },
-            .row_pitch  = use_buf ? x1 - x0 : stride,
+            .row_pitch  = stride,
+            .ptr        = base + (ptrdiff_t)y0 * stride + x0,
         };
-        if (use_buf) {
-            upload_params.buf = *ring;
-            upload_params.buf_offset = offsets[n];
-        } else {
-            upload_params.ptr = base + (ptrdiff_t)y0 * stride + x0;
-        }
-        if (!use_buf && p->gpu->limits.callbacks) {
+        if (p->gpu->limits.callbacks) {
             upload_params.callback = talloc_free;
             upload_params.priv = mp_image_new_ref(item->packed);
         }
@@ -578,12 +503,12 @@ static bool upload_osd_rects(struct vo *vo, const struct sub_bitmaps *item,
         if (!pl_tex_upload(p->gpu, &upload_params)) {
             talloc_free(upload_params.priv);
             MP_ERR(vo, "Failed uploading dirty OSD texture rect!\n");
-            talloc_free(tmp);
             return false;
         }
+
+        *dirty_area += (int64_t)(x1 - x0) * (y1 - y0);
     }
 
-    talloc_free(tmp);
     return true;
 }
 
