@@ -514,9 +514,12 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
         bool needs_recreate = !entry->tex || entry->format != item->format ||
             want_w > entry->tex->params.w ||
             want_h > entry->tex->params.h;
-        bool content_valid = item->change_id == 0 && !needs_recreate;
-        bool can_dirty_upload = item->format == SUBBITMAP_LIBASS &&
-            item->packed_dirty && item->num_packed_dirty > 0 && !needs_recreate;
+        bool persistent_ass = item->format == SUBBITMAP_LIBASS &&
+            item->packed_persistent;
+        bool has_dirty_rects = item->packed_dirty && item->num_packed_dirty > 0;
+        bool content_valid = !needs_recreate &&
+            (item->change_id == 0 || (persistent_ass && !has_dirty_rects));
+        bool can_dirty_upload = persistent_ass && has_dirty_rects && !needs_recreate;
 
         if (!content_valid) {
             dbg_uploads++;

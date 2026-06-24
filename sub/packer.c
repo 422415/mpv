@@ -409,6 +409,7 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
     res->packed_h = p->ass_atlas_used_h;
     res->packed_dirty = p->ass_atlas_dirty;
     res->num_packed_dirty = p->num_ass_atlas_dirty;
+    res->packed_persistent = true;
 
     uint8_t *base = res->packed->planes[0];
     int stride = res->packed->stride[0];
@@ -473,6 +474,7 @@ static bool reuse_ass_packing(struct mp_sub_packer *p, struct sub_bitmaps *res,
     res->packed = p->cached_subs.packed;
     res->packed_w = p->cached_subs.packed_w;
     res->packed_h = p->cached_subs.packed_h;
+    res->packed_persistent = p->cached_subs.packed_persistent;
 
     uint8_t *base = res->packed->planes[0];
     int stride = res->packed->stride[0];

@@ -93,6 +93,10 @@ struct sub_bitmaps {
     struct sub_bitmap_dirty_rect *packed_dirty;
     int num_packed_dirty;
 
+    // True when packed points to a persistent atlas whose contents survive
+    // across frames and can be updated via packed_dirty.
+    bool packed_persistent;
+
     int change_id;  // Incremented on each change (0 is never used)
 
     bool video_color_space; // True if the bitmap is in video color space
