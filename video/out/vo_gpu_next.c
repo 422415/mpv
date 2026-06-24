@@ -502,9 +502,18 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
             }
         }
 
+        int want_w = item->packed_w;
+        int want_h = item->packed_h;
+        if (item->format == SUBBITMAP_LIBASS && item->packed) {
+            want_w = MPMAX(want_w, item->packed->w);
+            want_h = MPMAX(want_h, item->packed->h);
+        }
+        want_w = (want_w + 255) & ~255;
+        want_h = (want_h + 255) & ~255;
+
         bool needs_recreate = !entry->tex || entry->format != item->format ||
-            item->packed_w > entry->tex->params.w ||
-            item->packed_h > entry->tex->params.h;
+            want_w > entry->tex->params.w ||
+            want_h > entry->tex->params.h;
         bool content_valid = item->change_id == 0 && !needs_recreate;
         bool can_dirty_upload = item->format == SUBBITMAP_LIBASS &&
             item->packed_dirty && item->num_packed_dirty > 0 && !needs_recreate;
@@ -513,11 +522,9 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
             dbg_uploads++;
             if (!entry->tex)
                 MP_TARRAY_POP(p->sub_tex, p->num_sub_tex, &entry->tex);
-            // Round the OSD texture up and grow it monotonically so it isn't
-            // reallocated every frame as the atlas grows through a dense scene
-            // (each realloc stalls the display thread).
-            int want_w = (item->packed_w + 255) & ~255;
-            int want_h = (item->packed_h + 255) & ~255;
+            // Grow to the backing atlas size, not just the current used bounds,
+            // so persistent ASS atlas additions can use partial texture uploads
+            // until the CPU atlas itself grows.
             bool ok = true;
             if (needs_recreate) {
                 ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
