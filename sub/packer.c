@@ -41,6 +41,7 @@
 #define ASS_ATLAS_INITIAL_SIZE 1024
 #define ASS_ATLAS_MAX_DIM 16384
 #define ASS_ATLAS_MAX_REFS 4096
+#define ASS_ATLAS_HASH_BUCKETS 8192
 
 struct packed_ass_ref {
     void *bitmap;
@@ -50,6 +51,7 @@ struct packed_ass_ref {
     uint64_t bitmap_hash;
     float blur_x, blur_y;
     int src_x, src_y;
+    int hash_next;
 };
 
 struct mp_sub_packer {
@@ -59,6 +61,7 @@ struct mp_sub_packer {
     struct packed_ass_ref *ass_atlas_refs;
     int num_ass_atlas_refs;
     int *ass_atlas_indices;
+    int ass_atlas_hash_buckets[ASS_ATLAS_HASH_BUCKETS];
     struct sub_bitmap_dirty_rect *ass_atlas_dirty;
     int num_ass_atlas_dirty;
     struct mp_image *ass_atlas_img;
@@ -193,6 +196,7 @@ static void reset_ass_atlas(struct mp_sub_packer *p)
     p->ass_atlas_used_w = p->ass_atlas_used_h = 0;
     p->ass_atlas_x = p->ass_atlas_y = p->ass_atlas_row_h = 0;
     p->num_ass_atlas_dirty = 0;
+    memset(p->ass_atlas_hash_buckets, 0, sizeof(p->ass_atlas_hash_buckets));
     talloc_free(p->ass_atlas_img);
     p->ass_atlas_img = NULL;
 }
@@ -236,11 +240,23 @@ static bool ensure_ass_atlas_img(struct mp_sub_packer *p, int want_w, int want_h
 static int find_ass_atlas_ref(struct mp_sub_packer *p, struct sub_bitmap *b,
                               uint64_t hash)
 {
-    for (int n = 0; n < p->num_ass_atlas_refs; n++) {
-        if (ass_atlas_ref_matches(p, &p->ass_atlas_refs[n], b, hash))
-            return n;
+    int bucket = hash & (ASS_ATLAS_HASH_BUCKETS - 1);
+    for (int node = p->ass_atlas_hash_buckets[bucket]; node; ) {
+        int idx = node - 1;
+        struct packed_ass_ref *ref = &p->ass_atlas_refs[idx];
+        node = ref->hash_next;
+        if (ass_atlas_ref_matches(p, ref, b, hash))
+            return idx;
     }
     return -1;
+}
+
+static void add_ass_atlas_ref_to_hash(struct mp_sub_packer *p, int idx)
+{
+    struct packed_ass_ref *ref = &p->ass_atlas_refs[idx];
+    int bucket = ref->bitmap_hash & (ASS_ATLAS_HASH_BUCKETS - 1);
+    ref->hash_next = p->ass_atlas_hash_buckets[bucket];
+    p->ass_atlas_hash_buckets[bucket] = idx + 1;
 }
 
 static bool alloc_ass_atlas_rect(struct mp_sub_packer *p, int w, int h,
@@ -380,6 +396,7 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
             reset_ass_atlas(p);
             return false;
         }
+        add_ass_atlas_ref_to_hash(p, idx);
         p->ass_atlas_indices[n] = idx;
         *content_changed = true;
     }
