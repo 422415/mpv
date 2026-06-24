@@ -69,6 +69,8 @@ struct osd_entry {
     pl_tex blur_tex, tmp_tex; // deferred-blur scratch (see osd_blur_part)
     struct pl_overlay_part *parts;
     int num_parts;
+    struct sub_bitmap_dirty_rect *valid_rects;
+    int num_valid_rects;
     enum sub_bitmap_format format;
     bool has_blur;
 };
@@ -395,19 +397,95 @@ static void osd_blur_part(struct priv *p, pl_tex src, pl_tex dst,
     }
 }
 
-static bool upload_osd_dirty_rects(struct vo *vo, const struct sub_bitmaps *item,
-                                   pl_tex tex, int64_t *dirty_area)
+static bool rect_contains_rect(const struct sub_bitmap_dirty_rect *a,
+                               const struct sub_bitmap_dirty_rect *b)
+{
+    return a->x0 <= b->x0 && a->y0 <= b->y0 &&
+           a->x1 >= b->x1 && a->y1 >= b->y1;
+}
+
+static void append_upload_rect(void *ta_ctx, struct sub_bitmap_dirty_rect **rects,
+                               int *num_rects, struct sub_bitmap_dirty_rect rc)
+{
+    if (rc.x0 >= rc.x1 || rc.y0 >= rc.y1)
+        return;
+
+    for (int n = 0; n < *num_rects; n++) {
+        struct sub_bitmap_dirty_rect *old = &(*rects)[n];
+        if (rect_contains_rect(old, &rc))
+            return;
+        if (rect_contains_rect(&rc, old)) {
+            *old = rc;
+            return;
+        }
+        if (old->y0 == rc.y0 && old->y1 == rc.y1 &&
+            rc.x0 <= old->x1 && rc.x1 >= old->x0)
+        {
+            old->x0 = MPMIN(old->x0, rc.x0);
+            old->x1 = MPMAX(old->x1, rc.x1);
+            return;
+        }
+        if (old->x0 == rc.x0 && old->x1 == rc.x1 &&
+            rc.y0 <= old->y1 && rc.y1 >= old->y0)
+        {
+            old->y0 = MPMIN(old->y0, rc.y0);
+            old->y1 = MPMAX(old->y1, rc.y1);
+            return;
+        }
+    }
+
+    MP_TARRAY_APPEND(ta_ctx, *rects, *num_rects, rc);
+}
+
+static bool rect_list_contains(const struct sub_bitmap_dirty_rect *rects,
+                               int num_rects, const struct sub_bitmap_dirty_rect *rc)
+{
+    for (int n = 0; n < num_rects; n++) {
+        if (rect_contains_rect(&rects[n], rc))
+            return true;
+    }
+    return false;
+}
+
+static bool sub_bitmap_intersects_rects(const struct sub_bitmap *b,
+                                        const struct sub_bitmap_dirty_rect *rects,
+                                        int num_rects)
+{
+    for (int n = 0; n < num_rects; n++) {
+        const struct sub_bitmap_dirty_rect *dirty = &rects[n];
+        if (b->src_x < dirty->x1 && b->src_x + b->w > dirty->x0 &&
+            b->src_y < dirty->y1 && b->src_y + b->h > dirty->y0)
+            return true;
+    }
+
+    return false;
+}
+
+static struct sub_bitmap_dirty_rect sub_bitmap_upload_rect(
+    const struct sub_bitmaps *item, const struct sub_bitmap *b)
+{
+    return (struct sub_bitmap_dirty_rect) {
+        .x0 = MPCLAMP(b->src_x - 1, 0, item->packed->w),
+        .y0 = MPCLAMP(b->src_y - 1, 0, item->packed->h),
+        .x1 = MPCLAMP(b->src_x + b->w + 1, 0, item->packed->w),
+        .y1 = MPCLAMP(b->src_y + b->h + 1, 0, item->packed->h),
+    };
+}
+
+static bool upload_osd_rects(struct vo *vo, const struct sub_bitmaps *item,
+                             pl_tex tex, const struct sub_bitmap_dirty_rect *rects,
+                             int num_rects, int64_t *dirty_area)
 {
     struct priv *p = vo->priv;
     int stride = item->packed->stride[0];
     uint8_t *base = item->packed->planes[0];
 
-    for (int n = 0; n < item->num_packed_dirty; n++) {
-        const struct sub_bitmap_dirty_rect *dirty = &item->packed_dirty[n];
-        int x0 = MPCLAMP(dirty->x0, 0, item->packed_w);
-        int y0 = MPCLAMP(dirty->y0, 0, item->packed_h);
-        int x1 = MPCLAMP(dirty->x1, 0, item->packed_w);
-        int y1 = MPCLAMP(dirty->y1, 0, item->packed_h);
+    for (int n = 0; n < num_rects; n++) {
+        const struct sub_bitmap_dirty_rect *dirty = &rects[n];
+        int x0 = MPCLAMP(dirty->x0, 0, item->packed->w);
+        int y0 = MPCLAMP(dirty->y0, 0, item->packed->h);
+        int x1 = MPCLAMP(dirty->x1, 0, item->packed->w);
+        int y1 = MPCLAMP(dirty->y1, 0, item->packed->h);
         if (x0 >= x1 || y0 >= y1)
             continue;
 
@@ -432,19 +510,6 @@ static bool upload_osd_dirty_rects(struct vo *vo, const struct sub_bitmaps *item
     }
 
     return true;
-}
-
-static bool sub_bitmap_intersects_dirty(const struct sub_bitmaps *item,
-                                        const struct sub_bitmap *b)
-{
-    for (int n = 0; n < item->num_packed_dirty; n++) {
-        const struct sub_bitmap_dirty_rect *dirty = &item->packed_dirty[n];
-        if (b->src_x < dirty->x1 && b->src_x + b->w > dirty->x0 &&
-            b->src_y < dirty->y1 && b->src_y + b->h > dirty->y0)
-            return true;
-    }
-
-    return false;
 }
 
 static void update_overlays(struct vo *vo, struct mp_osd_res res,
@@ -516,10 +581,30 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
             want_h > entry->tex->params.h;
         bool persistent_ass = item->format == SUBBITMAP_LIBASS &&
             item->packed_persistent;
-        bool has_dirty_rects = item->packed_dirty && item->num_packed_dirty > 0;
+        void *upload_tmp = talloc_new(NULL);
+        struct sub_bitmap_dirty_rect *upload_rects = NULL;
+        int num_upload_rects = 0;
+
+        if (persistent_ass) {
+            for (int i = 0; i < item->num_packed_dirty; i++) {
+                append_upload_rect(upload_tmp, &upload_rects, &num_upload_rects,
+                                   item->packed_dirty[i]);
+            }
+            for (int i = 0; i < item->num_parts; i++) {
+                const struct sub_bitmap *b = &item->parts[i];
+                if (b->w < 1 || b->h < 1)
+                    continue;
+                struct sub_bitmap_dirty_rect rc = sub_bitmap_upload_rect(item, b);
+                if (needs_recreate ||
+                    !rect_list_contains(entry->valid_rects, entry->num_valid_rects, &rc))
+                    append_upload_rect(upload_tmp, &upload_rects,
+                                       &num_upload_rects, rc);
+            }
+        }
+
         bool content_valid = !needs_recreate &&
-            (item->change_id == 0 || (persistent_ass && !has_dirty_rects));
-        bool can_dirty_upload = persistent_ass && has_dirty_rects && !needs_recreate;
+            (persistent_ass ? num_upload_rects == 0 : item->change_id == 0);
+        bool can_dirty_upload = persistent_ass && num_upload_rects > 0;
 
         if (!content_valid) {
             dbg_uploads++;
@@ -539,15 +624,17 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
                 });
                 if (!ok) {
                     MP_ERR(vo, "Failed recreating OSD texture!\n");
+                    talloc_free(upload_tmp);
                     break;
                 }
+                entry->num_valid_rects = 0;
             }
 
             bool full_upload = !can_dirty_upload;
             if (full_upload)
                 dbg_full_uploads++;
             else
-                dbg_dirty_rects += item->num_packed_dirty;
+                dbg_dirty_rects += num_upload_rects;
 
             int64_t dbg_u0 = mp_time_ns();
             if (full_upload) {
@@ -586,12 +673,33 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
                 if (!ok)
                     talloc_free(upload_params.priv);
             } else {
-                ok = upload_osd_dirty_rects(vo, item, entry->tex, &dbg_dirty_area);
+                ok = upload_osd_rects(vo, item, entry->tex, upload_rects,
+                                      num_upload_rects, &dbg_dirty_area);
             }
             dbg_upload += mp_time_ns() - dbg_u0;
             if (!ok) {
                 MP_ERR(vo, "Failed uploading OSD texture!\n");
+                talloc_free(upload_tmp);
                 break;
+            }
+
+            if (persistent_ass) {
+                if (full_upload) {
+                    entry->num_valid_rects = 0;
+                    append_upload_rect(p, &entry->valid_rects,
+                                       &entry->num_valid_rects,
+                                       (struct sub_bitmap_dirty_rect) {
+                                           .x0 = 0, .y0 = 0,
+                                           .x1 = item->packed_w,
+                                           .y1 = item->packed_h,
+                                       });
+                } else {
+                    for (int i = 0; i < num_upload_rects; i++) {
+                        append_upload_rect(p, &entry->valid_rects,
+                                           &entry->num_valid_rects,
+                                           upload_rects[i]);
+                    }
+                }
             }
 
             bool had_blur = entry->has_blur && entry->blur_tex && entry->tmp_tex;
@@ -618,7 +726,9 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
                         const struct sub_bitmap *b = &item->parts[i];
                         if (b->w < 1 || b->h < 1)
                             continue;
-                        if (!full_blur && !sub_bitmap_intersects_dirty(item, b))
+                        if (!full_blur &&
+                            !sub_bitmap_intersects_rects(b, upload_rects,
+                                                         num_upload_rects))
                             continue;
                         // separable: H with blur_x (atlas->tmp), V with blur_y (tmp->blur)
                         osd_blur_part(p, entry->tex, entry->tmp_tex,
@@ -730,6 +840,8 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
             ol->parts = entry->parts;
             ol->num_parts = entry->num_parts;
         }
+
+        talloc_free(upload_tmp);
     }
 
     // --- TEMP instrumentation emit (only for overlay frames with visible parts) ---
