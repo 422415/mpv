@@ -62,6 +62,10 @@ struct sub_bitmap {
     };
 };
 
+struct sub_bitmap_dirty_rect {
+    int x0, y0, x1, y1;
+};
+
 struct sub_bitmaps {
     // For VO cache state (limited by MAX_OSD_PARTS)
     int render_index;
@@ -82,6 +86,12 @@ struct sub_bitmaps {
     // Bounding box for the packed image. All parts will be within the bounding
     // box. (The origin of the box is at (0,0).)
     int packed_w, packed_h;
+
+    // Dirty rectangles inside packed. VOs may use this to partially update an
+    // existing texture when change_id is non-zero but only atlas additions were
+    // made since the previous frame. Empty means "unknown, upload all".
+    struct sub_bitmap_dirty_rect *packed_dirty;
+    int num_packed_dirty;
 
     int change_id;  // Incremented on each change (0 is never used)
 

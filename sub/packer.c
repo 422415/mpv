@@ -58,6 +58,8 @@ struct mp_sub_packer {
     int num_cached_ass_refs;
     struct packed_ass_ref *ass_atlas_refs;
     int num_ass_atlas_refs;
+    struct sub_bitmap_dirty_rect *ass_atlas_dirty;
+    int num_ass_atlas_dirty;
     struct mp_image *ass_atlas_img;
     int ass_atlas_w, ass_atlas_h;
     int ass_atlas_used_w, ass_atlas_used_h;
@@ -189,6 +191,7 @@ static void reset_ass_atlas(struct mp_sub_packer *p)
     p->ass_atlas_w = p->ass_atlas_h = 0;
     p->ass_atlas_used_w = p->ass_atlas_used_h = 0;
     p->ass_atlas_x = p->ass_atlas_y = p->ass_atlas_row_h = 0;
+    p->num_ass_atlas_dirty = 0;
     talloc_free(p->ass_atlas_img);
     p->ass_atlas_img = NULL;
 }
@@ -282,6 +285,35 @@ static bool alloc_ass_atlas_rect(struct mp_sub_packer *p, int w, int h,
     return true;
 }
 
+static void mark_ass_atlas_dirty(struct mp_sub_packer *p, int x, int y,
+                                 int w, int h)
+{
+    int pad = p->packer->padding;
+    struct sub_bitmap_dirty_rect rc = {
+        .x0 = MPCLAMP(x - pad, 0, p->ass_atlas_w),
+        .y0 = MPCLAMP(y - pad, 0, p->ass_atlas_h),
+        .x1 = MPCLAMP(x + w + pad, 0, p->ass_atlas_w),
+        .y1 = MPCLAMP(y + h + pad, 0, p->ass_atlas_h),
+    };
+    if (rc.x0 >= rc.x1 || rc.y0 >= rc.y1)
+        return;
+
+    // Atlas allocations are row-linear. Merge adjacent rectangles in the same
+    // row to avoid turning one subtitle frame into dozens of tiny GPU uploads.
+    for (int n = 0; n < p->num_ass_atlas_dirty; n++) {
+        struct sub_bitmap_dirty_rect *old = &p->ass_atlas_dirty[n];
+        if (old->y0 == rc.y0 && old->y1 == rc.y1 &&
+            rc.x0 <= old->x1 && rc.x1 >= old->x0)
+        {
+            old->x0 = MPMIN(old->x0, rc.x0);
+            old->x1 = MPMAX(old->x1, rc.x1);
+            return;
+        }
+    }
+
+    MP_TARRAY_APPEND(p, p->ass_atlas_dirty, p->num_ass_atlas_dirty, rc);
+}
+
 static bool cache_ass_bitmap(struct mp_sub_packer *p, struct sub_bitmap *b,
                              struct packed_ass_ref *ref)
 {
@@ -290,6 +322,7 @@ static bool cache_ass_bitmap(struct mp_sub_packer *p, struct sub_bitmap *b,
     void *pdata = base + ref->src_y * stride + ref->src_x;
     memcpy_pic(pdata, b->bitmap, b->w, b->h, stride, b->stride);
     fill_padding_1(pdata, b->w, b->h, stride, p->packer->padding);
+    mark_ass_atlas_dirty(p, ref->src_x, ref->src_y, b->w, b->h);
     return true;
 }
 
@@ -304,6 +337,7 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
     }
 
     *content_changed = false;
+    p->num_ass_atlas_dirty = 0;
 
     for (int n = 0; n < res->num_parts; n++) {
         struct sub_bitmap *b = &res->parts[n];
@@ -350,6 +384,8 @@ static bool pack_libass_cached(struct mp_sub_packer *p, struct sub_bitmaps *res,
     res->packed = p->ass_atlas_img;
     res->packed_w = p->ass_atlas_used_w;
     res->packed_h = p->ass_atlas_used_h;
+    res->packed_dirty = p->ass_atlas_dirty;
+    res->num_packed_dirty = p->num_ass_atlas_dirty;
 
     uint8_t *base = res->packed->planes[0];
     int stride = res->packed->stride[0];
@@ -655,6 +691,8 @@ void mp_sub_packer_pack_ass(struct mp_sub_packer *p, ASS_Image **image_lists,
             *out = res;
             p->cached_subs = res;
             p->cached_subs.change_id = 0;
+            p->cached_subs.packed_dirty = NULL;
+            p->cached_subs.num_packed_dirty = 0;
             p->cached_subs_valid = true;
             return;
         }

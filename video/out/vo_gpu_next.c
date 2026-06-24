@@ -395,6 +395,58 @@ static void osd_blur_part(struct priv *p, pl_tex src, pl_tex dst,
     }
 }
 
+static bool upload_osd_dirty_rects(struct vo *vo, const struct sub_bitmaps *item,
+                                   pl_tex tex, int64_t *dirty_area)
+{
+    struct priv *p = vo->priv;
+    int stride = item->packed->stride[0];
+    uint8_t *base = item->packed->planes[0];
+
+    for (int n = 0; n < item->num_packed_dirty; n++) {
+        const struct sub_bitmap_dirty_rect *dirty = &item->packed_dirty[n];
+        int x0 = MPCLAMP(dirty->x0, 0, item->packed_w);
+        int y0 = MPCLAMP(dirty->y0, 0, item->packed_h);
+        int x1 = MPCLAMP(dirty->x1, 0, item->packed_w);
+        int y1 = MPCLAMP(dirty->y1, 0, item->packed_h);
+        if (x0 >= x1 || y0 >= y1)
+            continue;
+
+        struct pl_tex_transfer_params upload_params = {
+            .tex        = tex,
+            .rc         = { .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 },
+            .row_pitch  = stride,
+            .ptr        = base + (ptrdiff_t)y0 * stride + x0,
+        };
+        if (p->gpu->limits.callbacks) {
+            upload_params.callback = talloc_free;
+            upload_params.priv = mp_image_new_ref(item->packed);
+        }
+
+        if (!pl_tex_upload(p->gpu, &upload_params)) {
+            talloc_free(upload_params.priv);
+            MP_ERR(vo, "Failed uploading dirty OSD texture rect!\n");
+            return false;
+        }
+
+        *dirty_area += (int64_t)(x1 - x0) * (y1 - y0);
+    }
+
+    return true;
+}
+
+static bool sub_bitmap_intersects_dirty(const struct sub_bitmaps *item,
+                                        const struct sub_bitmap *b)
+{
+    for (int n = 0; n < item->num_packed_dirty; n++) {
+        const struct sub_bitmap_dirty_rect *dirty = &item->packed_dirty[n];
+        if (b->src_x < dirty->x1 && b->src_x + b->w > dirty->x0 &&
+            b->src_y < dirty->y1 && b->src_y + b->h > dirty->y0)
+            return true;
+    }
+
+    return false;
+}
+
 static void update_overlays(struct vo *vo, struct mp_osd_res res,
                             int flags, enum pl_overlay_coords coords,
                             struct osd_state *state, struct pl_frame *frame,
@@ -416,6 +468,7 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
     int64_t dbg_upload = 0, dbg_blur = 0;
     int64_t dbg_area = 0, dbg_parts = 0, dbg_aw = 0, dbg_ah = 0;
     int64_t dbg_uploads = 0, dbg_reuses = 0;
+    int64_t dbg_dirty_area = 0, dbg_dirty_rects = 0, dbg_full_uploads = 0;
 
     for (int n = 0; n < subs->num_items; n++) {
         const struct sub_bitmaps *item = subs->items[n];
@@ -449,10 +502,12 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
             }
         }
 
-        bool content_valid = item->change_id == 0 &&
-            entry->tex && entry->format == item->format &&
-            item->packed_w <= entry->tex->params.w &&
-            item->packed_h <= entry->tex->params.h;
+        bool needs_recreate = !entry->tex || entry->format != item->format ||
+            item->packed_w > entry->tex->params.w ||
+            item->packed_h > entry->tex->params.h;
+        bool content_valid = item->change_id == 0 && !needs_recreate;
+        bool can_dirty_upload = item->format == SUBBITMAP_LIBASS &&
+            item->packed_dirty && item->num_packed_dirty > 0 && !needs_recreate;
 
         if (!content_valid) {
             dbg_uploads++;
@@ -463,63 +518,82 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
             // (each realloc stalls the display thread).
             int want_w = (item->packed_w + 255) & ~255;
             int want_h = (item->packed_h + 255) & ~255;
-            bool ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
-                .format = tex_fmt,
-                .w = MPMAX(want_w, entry->tex ? entry->tex->params.w : 0),
-                .h = MPMAX(want_h, entry->tex ? entry->tex->params.h : 0),
-                .host_writable = true,
-                .sampleable = true,
-            });
-            if (!ok) {
-                MP_ERR(vo, "Failed recreating OSD texture!\n");
-                break;
-            }
-            struct pl_tex_transfer_params upload_params = {
-                .tex        = entry->tex,
-                .rc         = { .x1 = item->packed_w, .y1 = item->packed_h, },
-                .row_pitch  = item->packed->stride[0],
-            };
-            // Upload the subtitle atlas via a streaming buffer. Position-only
-            // frames skip this block entirely and reuse the old GPU texture.
-            size_t buf_size = (size_t) upload_params.row_pitch * item->packed_h;
-            pl_buf *ring = &p->overlay_bufs[p->overlay_buf_idx++ % NUM_OVERLAY_BUFS];
-            int64_t dbg_u0 = mp_time_ns();
-            // Reuse the staging buffer whenever it's already big enough; only
-            // (re)allocate on growth, rounded up, so it stops being reallocated
-            // as the atlas grows frame-to-frame through a dense scene.
-            bool buf_ok = (*ring) && (*ring)->params.size >= buf_size;
-            if (!buf_ok) {
-                size_t want = (buf_size + (4u << 20) - 1) & ~(size_t)((4u << 20) - 1);
-                buf_ok = pl_buf_recreate(p->gpu, ring,
-                                         pl_buf_params(.size = want, .host_writable = true));
-            }
-            if (buf_ok)
-            {
-                pl_buf_write(p->gpu, *ring, 0, item->packed->planes[0], buf_size);
-                upload_params.buf = *ring;
-                ok = pl_tex_upload(p->gpu, &upload_params);
-            } else {
-                // Fallback to a direct upload if the buffer can't be allocated.
-                upload_params.ptr = item->packed->planes[0];
-                if (p->gpu->limits.callbacks) {
-                    upload_params.callback = talloc_free;
-                    upload_params.priv = mp_image_new_ref(item->packed);
+            bool ok = true;
+            if (needs_recreate) {
+                ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
+                    .format = tex_fmt,
+                    .w = MPMAX(want_w, entry->tex ? entry->tex->params.w : 0),
+                    .h = MPMAX(want_h, entry->tex ? entry->tex->params.h : 0),
+                    .host_writable = true,
+                    .sampleable = true,
+                });
+                if (!ok) {
+                    MP_ERR(vo, "Failed recreating OSD texture!\n");
+                    break;
                 }
-                ok = pl_tex_upload(p->gpu, &upload_params);
+            }
+
+            bool full_upload = !can_dirty_upload;
+            if (full_upload)
+                dbg_full_uploads++;
+            else
+                dbg_dirty_rects += item->num_packed_dirty;
+
+            int64_t dbg_u0 = mp_time_ns();
+            if (full_upload) {
+                struct pl_tex_transfer_params upload_params = {
+                    .tex        = entry->tex,
+                    .rc         = { .x1 = item->packed_w, .y1 = item->packed_h, },
+                    .row_pitch  = item->packed->stride[0],
+                };
+                // Upload the subtitle atlas via a streaming buffer. Position-only
+                // frames skip this block entirely and reuse the old GPU texture.
+                size_t buf_size = (size_t) upload_params.row_pitch * item->packed_h;
+                pl_buf *ring = &p->overlay_bufs[p->overlay_buf_idx++ % NUM_OVERLAY_BUFS];
+                // Reuse the staging buffer whenever it's already big enough; only
+                // (re)allocate on growth, rounded up, so it stops being reallocated
+                // as the atlas grows frame-to-frame through a dense scene.
+                bool buf_ok = (*ring) && (*ring)->params.size >= buf_size;
+                if (!buf_ok) {
+                    size_t want = (buf_size + (4u << 20) - 1) & ~(size_t)((4u << 20) - 1);
+                    buf_ok = pl_buf_recreate(p->gpu, ring,
+                                             pl_buf_params(.size = want, .host_writable = true));
+                }
+                if (buf_ok)
+                {
+                    pl_buf_write(p->gpu, *ring, 0, item->packed->planes[0], buf_size);
+                    upload_params.buf = *ring;
+                    ok = pl_tex_upload(p->gpu, &upload_params);
+                } else {
+                    // Fallback to a direct upload if the buffer can't be allocated.
+                    upload_params.ptr = item->packed->planes[0];
+                    if (p->gpu->limits.callbacks) {
+                        upload_params.callback = talloc_free;
+                        upload_params.priv = mp_image_new_ref(item->packed);
+                    }
+                    ok = pl_tex_upload(p->gpu, &upload_params);
+                }
+                if (!ok)
+                    talloc_free(upload_params.priv);
+            } else {
+                ok = upload_osd_dirty_rects(vo, item, entry->tex, &dbg_dirty_area);
             }
             dbg_upload += mp_time_ns() - dbg_u0;
             if (!ok) {
                 MP_ERR(vo, "Failed uploading OSD texture!\n");
-                talloc_free(upload_params.priv);
                 break;
             }
 
+            bool had_blur = entry->has_blur && entry->blur_tex && entry->tmp_tex;
             entry->format = item->format;
             entry->has_blur = false;
             overlay_tex = entry->tex;
 
             if (any_blur) {
                 int tw = entry->tex->params.w, th = entry->tex->params.h;
+                bool full_blur = full_upload || !had_blur ||
+                    entry->blur_tex->params.w < tw || entry->blur_tex->params.h < th ||
+                    entry->tmp_tex->params.w < tw || entry->tmp_tex->params.h < th;
                 struct pl_tex_params bp = { .format=tex_fmt, .w=tw, .h=th,
                                             .sampleable=true, .storable=true };
                 int64_t dbg_b0 = mp_time_ns();
@@ -533,6 +607,8 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
                     for (int i = 0; i < item->num_parts; i++) {
                         const struct sub_bitmap *b = &item->parts[i];
                         if (b->w < 1 || b->h < 1)
+                            continue;
+                        if (!full_blur && !sub_bitmap_intersects_dirty(item, b))
                             continue;
                         // separable: H with blur_x (atlas->tmp), V with blur_y (tmp->blur)
                         osd_blur_part(p, entry->tex, entry->tmp_tex,
@@ -656,6 +732,9 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
         MP_STATS(vo, "value %f osd-atlas-mpx", (double) dbg_aw * dbg_ah / 1e6);
         MP_STATS(vo, "value %f osd-uploads",   (double) dbg_uploads);
         MP_STATS(vo, "value %f osd-reuses",    (double) dbg_reuses);
+        MP_STATS(vo, "value %f osd-full-uploads", (double) dbg_full_uploads);
+        MP_STATS(vo, "value %f osd-dirty-rects",  (double) dbg_dirty_rects);
+        MP_STATS(vo, "value %f osd-dirty-mpx",    (double) dbg_dirty_area / 1e6);
     }
 
     talloc_free(subs);

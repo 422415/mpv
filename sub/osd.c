@@ -599,5 +599,14 @@ struct sub_bitmaps *sub_bitmaps_copy(struct sub_bitmap_copy_cache **p_cache,
     MP_RESIZE_ARRAY(res, res->parts, res->num_parts);
     memcpy(res->parts, in->parts, sizeof(res->parts[0]) * res->num_parts);
 
+    res->packed_dirty = NULL;
+    if (res->num_packed_dirty > 0 && in->packed_dirty) {
+        MP_RESIZE_ARRAY(res, res->packed_dirty, res->num_packed_dirty);
+        memcpy(res->packed_dirty, in->packed_dirty,
+               sizeof(res->packed_dirty[0]) * res->num_packed_dirty);
+    } else {
+        res->num_packed_dirty = 0;
+    }
+
     return res;
 }
