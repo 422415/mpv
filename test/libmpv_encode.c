@@ -86,7 +86,8 @@ static void check_color(void)
     if (codec->color_primaries != AVCOL_PRI_BT2020 ||
         codec->color_trc != AVCOL_TRC_SMPTE2084 ||
         codec->color_space != AVCOL_SPC_BT2020_NCL)
-        fail("filtered color metadata was not preserved by the encoder\n");
+        fail("filtered color metadata changed: primaries=%d transfer=%d matrix=%d\n",
+             codec->color_primaries, codec->color_trc, codec->color_space);
     avformat_close_input(&format);
 }
 
@@ -125,7 +126,7 @@ int main(int argc, char *argv[])
 
     set_property_string("idle", "once");
 
-    const char *cmd[] = {"loadfile", "av://lavfi:testsrc", NULL};
+    const char *cmd[] = {"loadfile", "av://lavfi:testsrc2", NULL};
     command(cmd);
 
     wait_done();
