@@ -205,6 +205,9 @@ enum {
     VO_CAP_FRAMEOWNER   = 1 << 5,
     // VO does handle mp_image_params.vflip
     VO_CAP_VFLIP        = 1 << 6,
+    // VO discards pixels/surfaces and accepts all image parameters, including
+    // every hardware subformat, without probing a rendering interop device.
+    VO_CAP_ANY_IMAGE    = 1 << 7,
 };
 
 enum {
