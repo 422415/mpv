@@ -26,7 +26,14 @@ struct ajn_sample_shared {
     uint32_t primaries, transfer, rotation, par_num, par_den;
     int32_t error;
     uint32_t crop_x, crop_y, crop_width, crop_height, vflip;
-    uint8_t reserved[100];
+    // Optional private player-observation extension. Old worker mappings keep
+    // these bytes zero. Writers serialize publication across filter rebuilds;
+    // a retired producer cannot replace a newer producer's status.
+    int32_t writer;
+    int64_t producer;
+    int64_t lease_until_ms;      // GetTickCount64; named player mappings only
+    int64_t player_status;       // producer:32, status:32; stale status is ignored
+    uint8_t reserved[72];
     uint8_t pixels[AJN_SAMPLE_BYTES];
 };
 
@@ -40,6 +47,8 @@ enum ajn_sample_transfer { AJN_TRC_1886 = 1, AJN_TRC_SRGB, AJN_TRC_G22, AJN_TRC_
 _Static_assert(offsetof(struct ajn_sample_shared, config) == 16, "config ABI");
 _Static_assert(offsetof(struct ajn_sample_shared, sequence) == 32, "sequence ABI");
 _Static_assert(offsetof(struct ajn_sample_shared, status) == 104, "status ABI");
+_Static_assert(offsetof(struct ajn_sample_shared, producer) == 160, "producer ABI");
+_Static_assert(offsetof(struct ajn_sample_shared, lease_until_ms) == 168, "lease ABI");
 _Static_assert(offsetof(struct ajn_sample_shared, pixels) == 256, "pixel ABI");
 _Static_assert(sizeof(struct ajn_sample_shared) == 256 + AJN_SAMPLE_BYTES, "map ABI");
 

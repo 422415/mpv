@@ -13,15 +13,20 @@
 #include "video/mp_image.h"
 #include "ajn_sample_shared.h"
 #include "ajn_sample_gpu.h"
+#include "ajn_sample_lifetime.h"
 
-struct opts { int64_t mapping; };
+struct opts { int64_t mapping; char *name; };
+static LONG player_buffers;
+static LONG player_generation;
 struct priv {
     struct opts *opts;
     struct ajn_sample_shared *shared;
     mp_mutex lock;
     mp_thread thread;
     HANDLE wake;
-    bool started, stopping, failed;
+    bool started, stopping, failed, detached, reserved;
+    struct ajn_sample_lifetime lifetime;
+    int64_t producer;
     struct ajn_sample_gpu *gpu;
     ID3D11Device *device;
     DXGI_FORMAT format;
@@ -34,6 +39,15 @@ struct priv {
     uint8_t scratch[AJN_SAMPLE_BYTES];
 };
 
+static void cleanup(struct priv *p);
+static void release(struct priv *p)
+{
+    if (ajn_sample_lifetime_release(&p->lifetime)) {
+        cleanup(p);
+        talloc_free(p);
+    }
+}
+
 static int64_t read64(int64_t *p)
 {
     return InterlockedCompareExchange64((volatile LONG64 *)p, 0, 0);
@@ -41,6 +55,11 @@ static int64_t read64(int64_t *p)
 
 static void state(struct priv *p, enum ajn_sample_status status, HRESULT error)
 {
+    if (p->detached) {
+        if (read64(&p->shared->producer) != p->producer) return;
+        InterlockedExchange64((volatile LONG64 *)&p->shared->player_status,
+            (p->producer << 32) | status);
+    }
     InterlockedExchange((volatile LONG *)&p->shared->error, error);
     InterlockedExchange((volatile LONG *)&p->shared->status, status);
 }
@@ -78,6 +97,19 @@ static void publish(struct priv *p)
 {
     struct ajn_sample_shared *s = p->shared;
     const struct mp_image *image = p->pending;
+    if (InterlockedCompareExchange((volatile LONG *)&s->writer, 1, 0)) {
+        drop(p);
+        return;
+    }
+    if (p->pending_config != read64(&s->config) ||
+        p->pending_epoch != read64(&s->epoch) ||
+        (p->detached && (ajn_sample_lifetime_stopping(&p->lifetime) ||
+            read64(&s->producer) != p->producer ||
+            read64(&s->lease_until_ms) <= (int64_t)GetTickCount64()))) {
+        InterlockedExchange((volatile LONG *)&s->writer, 0);
+        drop(p);
+        return;
+    }
     InterlockedIncrement64((volatile LONG64 *)&s->sequence);
     s->frame_id++;
     s->sample_config = p->pending_config;
@@ -98,6 +130,7 @@ static void publish(struct priv *p)
     s->vflip = image->params.vflip;
     memcpy(s->pixels, p->scratch, s->payload_bytes);
     InterlockedIncrement64((volatile LONG64 *)&s->sequence);
+    InterlockedExchange((volatile LONG *)&s->writer, 0);
     state(p, AJN_SAMPLE_READY, S_OK);
 }
 
@@ -105,15 +138,21 @@ static MP_THREAD_VOID readback(void *context)
 {
     struct priv *p = context;
     mp_thread_set_name("ajn-sample");
+    ULONGLONG retired_at = 0;
     for (;;) {
         mp_mutex_lock(&p->lock);
-        if (p->pending && !p->failed) {
+        bool stopping = p->detached ? ajn_sample_lifetime_stopping(&p->lifetime) : p->stopping;
+        if (stopping && !retired_at) retired_at = GetTickCount64();
+        if (p->pending && (!p->failed || p->detached)) {
             HRESULT hr = ajn_sample_gpu_read(p->gpu, p->scratch);
             if (FAILED(hr)) {
-                // Retain the source on a terminal driver failure. No subsequent
-                // sample can reuse it; the supervised process owns teardown.
+                // Preserve the source until completion or confirmed device
+                // removal. Player retirement cannot free a decoder-pool image
+                // while the GPU may still be reading it.
                 p->failed = true;
                 state(p, AJN_SAMPLE_FAILED, hr);
+                if (p->detached && FAILED(ID3D11Device_GetDeviceRemovedReason(p->device)))
+                    TA_FREEP(&p->pending);
             } else if (hr == S_OK) {
                 if (p->pending_config == read64(&p->shared->config) &&
                     p->pending_epoch == read64(&p->shared->epoch)) publish(p);
@@ -121,24 +160,27 @@ static MP_THREAD_VOID readback(void *context)
                 TA_FREEP(&p->pending);
             }
         }
-        if (p->stopping && (!p->pending || p->failed)) {
+        if (stopping && (!p->pending || (p->failed && !p->detached))) {
             TA_FREEP(&p->pending);
             mp_mutex_unlock(&p->lock);
             break;
         }
-        bool poll = p->pending && !p->failed;
+        bool poll = p->pending && (!p->failed || p->detached);
         mp_mutex_unlock(&p->lock);
-        WaitForSingleObject(p->wake, poll ? 1 : INFINITE);
+        WaitForSingleObject(p->wake, poll ? (retired_at && GetTickCount64() - retired_at > 250 ? 100 : 1) : INFINITE);
     }
+    if (p->detached) release(p);
     MP_THREAD_RETURN();
 }
 
 static void sample(struct mp_filter *f, struct mp_image *image)
 {
     struct priv *p = f->priv;
+    if (!p->shared || !p->started) return;
     int width, height, fps;
     int64_t config = read64(&p->shared->config);
-    if (!ajn_sample_config(config, &width, &height, &fps)) {
+    if (!ajn_sample_config(config, &width, &height, &fps) ||
+        (p->detached && read64(&p->shared->lease_until_ms) <= (int64_t)GetTickCount64())) {
         state(p, AJN_SAMPLE_IDLE, S_OK);
         return;
     }
@@ -213,9 +255,27 @@ static void reset(struct mp_filter *f)
     p->last_submit = 0;
 }
 
+static void cleanup(struct priv *p)
+{
+    ajn_sample_gpu_destroy(p->gpu);
+    if (p->device) ID3D11Device_Release(p->device);
+    if (p->wake) CloseHandle(p->wake);
+    if (p->shared) { state(p, AJN_SAMPLE_CLOSED, S_OK); UnmapViewOfFile(p->shared); }
+    mp_mutex_destroy(&p->lock);
+    if (p->reserved) InterlockedDecrement(&player_buffers);
+}
+
 static void destroy(struct mp_filter *f)
 {
     struct priv *p = f->priv;
+    if (p->detached) {
+        // The owner reference keeps p/wake valid until SetEvent completes even
+        // if the thread finishes concurrently. No mutex or driver wait here.
+        ajn_sample_lifetime_stop(&p->lifetime);
+        if (p->started) { SetEvent(p->wake); mp_thread_detach(p->thread); }
+        release(p);
+        return;
+    }
     if (p->started) {
         mp_mutex_lock(&p->lock); p->stopping = true; mp_mutex_unlock(&p->lock);
         SetEvent(p->wake);
@@ -223,11 +283,7 @@ static void destroy(struct mp_filter *f)
         // process has a bounded shutdown deadline if a GPU driver never replies.
         mp_thread_join(p->thread);
     }
-    ajn_sample_gpu_destroy(p->gpu);
-    if (p->device) ID3D11Device_Release(p->device);
-    if (p->wake) CloseHandle(p->wake);
-    if (p->shared) { state(p, AJN_SAMPLE_CLOSED, S_OK); UnmapViewOfFile(p->shared); }
-    mp_mutex_destroy(&p->lock);
+    cleanup(p);
 }
 
 static const struct mp_filter_info filter = {
@@ -242,14 +298,56 @@ static struct mp_filter *create(struct mp_filter *parent, void *options)
     struct priv *p = f->priv;
     mp_mutex_init(&p->lock);
     p->opts = talloc_steal(p, options);
-    if (p->opts->mapping <= 0) goto fail;
-    p->shared = MapViewOfFile((HANDLE)(uintptr_t)p->opts->mapping, FILE_MAP_READ | FILE_MAP_WRITE,
+    p->detached = p->opts->name && p->opts->name[0];
+    HANDLE mapping = (HANDLE)(uintptr_t)p->opts->mapping;
+    if (p->detached) {
+        talloc_steal(NULL, p);
+        ajn_sample_lifetime_init(&p->lifetime);
+        // Four live/retiring branches bound retained driver work across rapid
+        // reconfiguration. Failure leaves this observation filter a pass-through.
+        if (InterlockedIncrement(&player_buffers) > 4) {
+            InterlockedDecrement(&player_buffers);
+            goto fail;
+        }
+        p->reserved = true;
+        p->producer = InterlockedIncrement(&player_generation);
+        if (p->producer <= 0) goto fail;
+        const char *prefix = "Local\\AJN.PlayerFrames.";
+        size_t prefix_len = strlen(prefix);
+        if (p->opts->mapping || strlen(p->opts->name) != prefix_len + 32 ||
+            strncmp(p->opts->name, prefix, prefix_len)) goto fail;
+        for (size_t i = prefix_len; i < prefix_len + 32; i++)
+            if (!strchr("0123456789abcdef", p->opts->name[i])) goto fail;
+        wchar_t name[80];
+        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p->opts->name, -1, name, 80)) goto fail;
+        mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+        if (!mapping) goto fail;
+    } else if (p->opts->mapping <= 0) goto fail;
+    p->shared = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE,
         0, 0, sizeof(*p->shared));
+    if (p->detached) CloseHandle(mapping);
     if (!p->shared) goto fail;
     if (p->shared->magic != AJN_SAMPLE_MAGIC || p->shared->version != AJN_SAMPLE_VERSION ||
-        p->shared->capacity != AJN_SAMPLE_BYTES || p->shared->header_bytes != 256) goto fail;
+        p->shared->capacity != AJN_SAMPLE_BYTES || p->shared->header_bytes != 256) {
+        UnmapViewOfFile(p->shared);
+        p->shared = NULL;
+        goto fail;
+    }
+    if (p->detached) {
+        // Readback may outlive the mpv context. Pin this DLL and its imported
+        // dependencies until process exit so asynchronous cleanup has valid code.
+        HMODULE module;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (LPCWSTR)(uintptr_t)readback, &module)) goto fail;
+        InterlockedExchange64((volatile LONG64 *)&p->shared->producer, p->producer);
+    }
     p->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!p->wake || mp_thread_create(&p->thread, readback, p)) goto fail;
+    if (!p->wake) goto fail;
+    if (p->detached) ajn_sample_lifetime_acquire(&p->lifetime);
+    if (mp_thread_create(&p->thread, readback, p)) {
+        if (p->detached) release(p);
+        goto fail;
+    }
     p->started = true;
     reset(f);
     state(p, AJN_SAMPLE_IDLE, S_OK);
@@ -258,6 +356,12 @@ static struct mp_filter *create(struct mp_filter *parent, void *options)
     return f;
 fail:
     MP_ERR(f, "Invalid private AJN sample mapping.\n");
+    if (p->detached) {
+        // An unavailable observer must never make the user's video fail.
+        mp_filter_add_pin(f, MP_PIN_IN, "in");
+        mp_filter_add_pin(f, MP_PIN_OUT, "out");
+        return f;
+    }
     talloc_free(f);
     return NULL;
 }
@@ -267,7 +371,7 @@ const struct mp_user_filter_entry vf_ajn_sample = {
     .desc = {
         .description = "private bounded AJN GPU sample branch",
         .name = "ajn-sample", .priv_size = sizeof(struct opts),
-        .options = (const m_option_t[]) {{"mapping", OPT_INT64(mapping)}, {0}},
+        .options = (const m_option_t[]) {{"mapping", OPT_INT64(mapping)}, {"name", OPT_STRING(name)}, {0}},
     },
     .create = create,
 };

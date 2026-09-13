@@ -99,6 +99,11 @@ test('linked-list', linked_list)
 ajn_sample_shared = executable('ajn-sample-shared', files('ajn_sample_shared.c'), include_directories: incdir)
 test('ajn-sample-shared', ajn_sample_shared)
 
+if win32
+    ajn_sample_lifetime = executable('ajn-sample-lifetime', files('ajn_sample_lifetime.c'), include_directories: incdir)
+    test('ajn-sample-lifetime', ajn_sample_lifetime)
+endif
+
 timer = executable('timer', files('timer.c'), include_directories: incdir, link_with: test_utils)
 test('timer', timer)
 
