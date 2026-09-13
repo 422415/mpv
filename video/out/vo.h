@@ -208,6 +208,10 @@ enum {
     // VO discards pixels/surfaces and accepts all image parameters, including
     // every hardware subformat, without probing a rendering interop device.
     VO_CAP_ANY_IMAGE    = 1 << 7,
+    // VO imports the frame's AVHWFramesContext directly. A hardware container
+    // and its software surface format must both pass query_format; no display
+    // interop device is involved (encoding).
+    VO_CAP_HW_FRAMES    = 1 << 8,
 };
 
 enum {

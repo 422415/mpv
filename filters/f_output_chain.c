@@ -101,8 +101,22 @@ static void update_output_caps(struct chain *p)
         vo_query_formats(p->vo, allowed_output_formats);
 
         for (int n = 0; n < MP_ARRAY_SIZE(allowed_output_formats); n++) {
-            if (allowed_output_formats[n])
-                mp_autoconvert_add_imgfmt(p->convert, IMGFMT_START + n, 0);
+            if (!allowed_output_formats[n])
+                continue;
+            int format = IMGFMT_START + n;
+            mp_autoconvert_add_imgfmt(p->convert, format, 0);
+            if (IMGFMT_IS_HWACCEL(format) &&
+                (p->vo->driver->caps & VO_CAP_HW_FRAMES))
+            {
+                // The encoder consumes the upstream hardware pool. Register
+                // its accepted surface formats explicitly so autoconvert does
+                // not probe a missing display interop and download the frame.
+                for (int s = 0; s < MP_ARRAY_SIZE(allowed_output_formats); s++) {
+                    int subformat = IMGFMT_START + s;
+                    if (allowed_output_formats[s] && !IMGFMT_IS_HWACCEL(subformat))
+                        mp_autoconvert_add_imgfmt(p->convert, format, subformat);
+                }
+            }
         }
     }
 }

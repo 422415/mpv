@@ -110,6 +110,22 @@ static int reconfig2(struct vo *vo, struct mp_image *img)
     encoder->pix_fmt = pix_fmt;
     encoder->colorspace = pl_system_to_av(params->repr.sys);
     encoder->color_range = pl_levels_to_av(params->repr.levels);
+    encoder->color_primaries = pl_primaries_to_av(params->color.primaries);
+    encoder->color_trc = pl_transfer_to_av(params->color.transfer);
+    encoder->chroma_sample_location = pl_chroma_to_av(params->chroma_location);
+
+    if (IMGFMT_IS_HWACCEL(params->imgfmt)) {
+        if (!img->hwctx) {
+            MP_FATAL(vo, "Hardware encoding requires a frame context.\n");
+            goto error;
+        }
+        encoder->hw_frames_ctx = av_buffer_ref(img->hwctx);
+        if (!encoder->hw_frames_ctx)
+            goto error;
+        MP_VERBOSE(vo, "Encoding hardware frames directly: %s[%s]\n",
+                   mp_imgfmt_to_name(params->imgfmt),
+                   mp_imgfmt_to_name(params->hw_subfmt));
+    }
 
     AVRational tb;
 
@@ -157,6 +173,11 @@ static int query_format(struct vo *vo, int format)
 {
     struct priv *vc = vo->priv;
 
+    // Keep ordinary encoding's software subtitle composition by default.
+    // The direct hardware path is explicitly selected by headless consumers.
+    if (IMGFMT_IS_HWACCEL(format) && !vc->enc->options->hwframes)
+        return 0;
+
     enum AVPixelFormat pix_fmt = imgfmt2pixfmt(format);
     const enum AVPixelFormat *p;
     int ret = mp_avcodec_get_supported_config(vc->enc->encoder, NULL,
@@ -188,7 +209,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *voframe)
     struct mp_image *mpi = voframe->frames[0];
 
     struct mp_osd_res dim = osd_res_from_image_params(vo->params);
-    osd_draw_on_image(vo->osd, dim, mpi->pts, OSD_DRAW_SUB_ONLY, mpi);
+    if (!IMGFMT_IS_HWACCEL(mpi->imgfmt))
+        osd_draw_on_image(vo->osd, dim, mpi->pts, OSD_DRAW_SUB_ONLY, mpi);
 
     if (vc->shutdown)
         goto done;
@@ -252,7 +274,7 @@ const struct vo_driver video_out_lavc = {
     .encode = true,
     .description = "video encoding using libavcodec",
     .name = "lavc",
-    .caps = VO_CAP_UNTIMED,
+    .caps = VO_CAP_UNTIMED | VO_CAP_HW_FRAMES,
     .priv_size = sizeof(struct priv),
     .preinit = preinit,
     .query_format = query_format,
