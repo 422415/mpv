@@ -93,10 +93,9 @@ static void update_output_caps(struct chain *p)
 
     mp_autoconvert_clear(p->convert);
 
-    // A sink which never reads pixels needs no conversion or hardware interop.
-    // In particular, probing null's missing interop would otherwise download
-    // every GPU frame before discarding it.
-    if (p->vo && !(p->vo->driver->caps & VO_CAP_ANY_IMAGE)) {
+    // A discard sink can explicitly opt out of conversion and interop probing.
+    // Ordinary --vo=null retains its historical behavior for existing callers.
+    if (p->vo && !p->vo->accepts_any_image) {
         uint8_t allowed_output_formats[IMGFMT_END - IMGFMT_START] = {0};
         vo_query_formats(p->vo, allowed_output_formats);
 

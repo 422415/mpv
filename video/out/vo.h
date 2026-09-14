@@ -205,9 +205,6 @@ enum {
     VO_CAP_FRAMEOWNER   = 1 << 5,
     // VO does handle mp_image_params.vflip
     VO_CAP_VFLIP        = 1 << 6,
-    // VO discards pixels/surfaces and accepts all image parameters, including
-    // every hardware subformat, without probing a rendering interop device.
-    VO_CAP_ANY_IMAGE    = 1 << 7,
     // VO imports the frame's AVHWFramesContext directly. A hardware container
     // and its software surface format must both pass query_format; no display
     // interop device is involved (encoding).
@@ -489,6 +486,10 @@ struct vo {
     // --- The following fields are generally only changed during initialization.
 
     bool probing;
+
+    // Explicit discard-sink opt-in, fixed by preinit. The default null VO keeps
+    // its historical conversion behavior (including benchmark semantics).
+    bool accepts_any_image;
 
     // --- The following fields are only changed with vo_reconfig(), and can
     //     be accessed unsynchronized (read-only).

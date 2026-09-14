@@ -30,6 +30,7 @@ struct priv {
     int64_t last_vsync;
 
     double cfg_fps;
+    bool cfg_accept_hwframes;
 };
 
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
@@ -69,6 +70,8 @@ static void uninit(struct vo *vo)
 
 static int preinit(struct vo *vo)
 {
+    struct priv *p = vo->priv;
+    vo->accepts_any_image = p->cfg_accept_hwframes;
     return 0;
 }
 
@@ -89,7 +92,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
 const struct vo_driver video_out_null = {
     .description = "Null video output",
     .name = "null",
-    .caps = VO_CAP_ANY_IMAGE,
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,
@@ -100,6 +102,7 @@ const struct vo_driver video_out_null = {
     .priv_size = sizeof(struct priv),
     .options = (const struct m_option[]) {
         {"fps", OPT_DOUBLE(cfg_fps), M_RANGE(0, 10000)},
+        {"accept-hwframes", OPT_BOOL(cfg_accept_hwframes)},
         {0},
     },
     .options_prefix = "vo-null",
