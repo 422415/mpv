@@ -4,6 +4,7 @@
   "privatePlayerSampleAbi": 1,
   "privateOutputAbi": 1,
   "privateProbeAbi": 1,
+  "privateMuxAbi": 1,
   "nullHardwareFramesOptIn": 1,
   "requiredFeatures": ["D3D11", "ASS_RENDER_THREAD_COUNT", "ASS_BLUR_DEFERRED", "ASS_COMPOSITE_DEFERRED", "ASS_OUTLINE_DEFERRED"],
   "requiredOptions": {"cplayer": true, "libmpv": true}

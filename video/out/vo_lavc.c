@@ -41,6 +41,8 @@ struct priv {
     struct encoder_context *enc;
 
     bool shutdown;
+    bool keyframe_started;
+    double next_keyframe;
 };
 
 static int preinit(struct vo *vo)
@@ -253,6 +255,15 @@ static bool draw_frame(struct vo *vo, struct vo_frame *voframe)
 
     frame->pts = rint(outpts * av_q2d(av_inv_q(avc->time_base)));
     frame->pict_type = 0; // keep this at unknown/undefined
+    // Host-managed segments need media-time boundaries, including VFR input.
+    // The default zero interval preserves existing frame-count scheduling.
+    double interval = enc->options->keyframe_seconds;
+    if (interval > 0 && isfinite(outpts) &&
+        (!vc->keyframe_started || outpts >= vc->next_keyframe)) {
+        frame->pict_type = AV_PICTURE_TYPE_I;
+        vc->keyframe_started = true;
+        vc->next_keyframe = outpts + interval;
+    }
     frame->quality = avc->global_quality;
     encoder_encode(enc, frame);
     av_frame_free(&frame);
