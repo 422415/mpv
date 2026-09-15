@@ -54,11 +54,12 @@ void ajn_scene_reset(struct ajn_scene *s)
 {
     if (!s) return;
     s->cached_pts = MP_NOPTS_VALUE;
-    if (s->shared && enter(s->shared)) {
-        if (s->shared->epoch < INT64_MAX) s->shared->epoch++;
-        s->shared->request_id = 0;
-        s->shared->response_id = 0;
-        leave(s->shared);
+    if (s->shared) {
+        // A seek must invalidate pending replies even while the host copies
+        // the sample under the header lock. The producer itself is serial.
+        InterlockedIncrement64((volatile LONG64 *)&s->shared->epoch);
+        InterlockedExchange64((volatile LONG64 *)&s->shared->request_id, 0);
+        InterlockedExchange64((volatile LONG64 *)&s->shared->response_id, 0);
     }
 }
 bool ajn_scene_connect(struct ajn_scene *s, const char *name)
@@ -84,7 +85,7 @@ bool ajn_scene_connect(struct ajn_scene *s, const char *name)
     CloseHandle(mapping);
     if (!s->shared) return false;
     struct ajn_scene_shared *h = s->shared;
-    if (h->magic != AJN_SCENE_MAGIC || h->version != 1 ||
+    if (h->magic != AJN_SCENE_MAGIC || h->version != AJN_SCENE_VERSION ||
         h->capacity != AJN_SCENE_BYTES || h->header_bytes != 256) goto fail;
     wcscat(wide, L".Ready");
     s->ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, wide);

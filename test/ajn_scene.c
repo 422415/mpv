@@ -73,8 +73,10 @@ int main(void)
         assert_int_equal(h->accepted, decision + 2);
     }
     int64_t epoch = h->epoch;
+    h->lock = 1; // Reset must also invalidate a request during host readback.
     ajn_scene_reset(s);
     mp_require(h->epoch == epoch + 1 && !h->request_id && !h->response_id);
+    h->lock = 0;
     assert_int_equal(ajn_scene_decide(s, a, b, false), -1);
     assert_int_equal(h->status, 5);
     b->params.color.transfer = PL_COLOR_TRC_PQ;
