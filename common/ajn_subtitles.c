@@ -68,6 +68,9 @@ MPV_EXPORT int mpv_ajn_subtitles_v1(void *opaque,
     if (!encoder->subtitle_header) { result = AVERROR(ENOMEM); goto done; }
     memcpy(encoder->subtitle_header, decoder->subtitle_header, decoder->subtitle_header_size);
     encoder->subtitle_header_size = decoder->subtitle_header_size;
+    // WebVTT requires an encoder time base even though this helper formats
+    // source-timed cue boundaries itself at millisecond precision.
+    encoder->time_base = (AVRational){1, 1000};
     result = avcodec_open2(encoder, encode_codec, NULL); if (result < 0) goto done;
     result = write(opaque, (const uint8_t *)"WEBVTT\n\n", 8); if (result < 0) goto done;
     // Scan selected packets so cues crossing the requested start remain present.

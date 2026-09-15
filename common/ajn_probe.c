@@ -114,8 +114,12 @@ MPV_EXPORT int mpv_ajn_probe_v1(void *opaque,
     seconds(&root, "durationSeconds", format->duration, AV_TIME_BASE_Q);
     seconds(&root, "startSeconds", format->start_time, AV_TIME_BASE_Q);
     node_map_add_flag(&root, "seekable", can_seek != 0);
-    mpv_node *tracks = node_map_add(&root, "tracks", MPV_FORMAT_NODE_ARRAY);
-    mpv_node *attachments = node_map_add(&root, "attachments", MPV_FORMAT_NODE_ARRAY);
+    node_map_add(&root, "tracks", MPV_FORMAT_NODE_ARRAY);
+    node_map_add(&root, "attachments", MPV_FORMAT_NODE_ARRAY);
+    // Adding a sibling can reallocate the root's value array. Acquire child
+    // pointers only after both entries exist, before filling either array.
+    mpv_node *tracks = node_map_get(&root, "tracks");
+    mpv_node *attachments = node_map_get(&root, "attachments");
     int ordinals[AVMEDIA_TYPE_NB] = {0};
     for (unsigned i = 0; i < format->nb_streams; ++i) {
         AVStream *stream = format->streams[i];
