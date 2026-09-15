@@ -1439,6 +1439,9 @@ features += {'cuda-hwaccel': cuda_hwaccel.allowed()}
 if features['cuda-hwaccel']
     sources += files('video/filter/vf_animejanai.c',
                      'video/out/hwdec/hwdec_cuda.c')
+    if win32
+        sources += files('video/filter/ajn_scene.c')
+    endif
 endif
 
 cuda_interop = get_option('cuda-interop').require(

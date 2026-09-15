@@ -76,6 +76,7 @@
 #include "video/mp_image_pool.h"
 
 #include "aji.h"
+#include "ajn_scene.h"
 
 #ifdef _WIN32
 #define AJI_DEFAULT_LIB "aji.dll"
@@ -170,6 +171,9 @@ struct aji_api {
                   void *cu_stream);          // optional; pre-RIFE downscale
     int (*infer_rife)(aji_ctx *c, const aji_frame *a, const aji_frame *b,
                       double t, const aji_frame *out, void *cu_stream);
+    int (*rife_scene_supported)(aji_ctx *c);
+    int (*infer_rife_with_scene)(aji_ctx *c, const aji_frame *a, const aji_frame *b,
+                      double t, const aji_frame *out, void *cu_stream, int scene);
     int (*poll)(aji_ctx *c);
     const char *(*current_log)(aji_ctx *c);
     const char *(*last_error)(aji_ctx *c);
@@ -253,6 +257,8 @@ struct priv {
     // With fractional factors some source frames are never emitted and
     // only serve as interpolation endpoints.
     bool rife_on;
+    struct ajn_scene *scene;
+    int scene_decision;
     int rife_num, rife_den;     // reduced output multiplier num/den
     int rife_acc;               // next grid point's offset into the
                                 // current pair, in 1/num units (0, num]
@@ -389,6 +395,8 @@ static void drain_backend(struct mp_filter *vf)
 static void flush_frames(struct mp_filter *vf)
 {
     struct priv *p = vf->priv;
+    ajn_scene_reset(p->scene);
+    p->scene_decision = -1;
     // GPU reads of the queued input frames must finish before the
     // refqueue drops them
     clear_ring(vf);
@@ -1012,6 +1020,26 @@ done:
     return out;
 }
 
+// Evaluate once per original pair, independent of the interpolation factor.
+// This optional bridge may download reduced-analysis input; ordinary playback
+// without a detector retains the existing GPU-only path.
+static int scene_pair(struct mp_filter *vf, struct mp_image *a, struct mp_image *b)
+{
+    struct priv *p = vf->priv;
+    if (!ajn_scene_active(p->scene)) return -1;
+    bool supported = p->api.infer_rife_with_scene && p->api.rife_scene_supported &&
+        p->api.rife_scene_supported(p->aji);
+    if (supported && !p->is_d3d11) {
+        if (!order_after_decode(vf) ||
+            CHECK_CU(p->cu->cuCtxPushCurrent(p->cuda_ctx)) < 0) return -1;
+        CUcontext dummy;
+        bool ready = CHECK_CU(p->cu->cuStreamSynchronize(p->stream)) >= 0;
+        CHECK_CU(p->cu->cuCtxPopCurrent(&dummy));
+        if (!ready) return -1;
+    }
+    return ajn_scene_decide(p->scene, a, b, supported);
+}
+
 // Interpolate between two upscaled frames at time point t. Returns the
 // interpolated image, a new ref of `a` on a scene change (the reference
 // pipeline substitutes the left frame), or NULL on error. pts is left for
@@ -1051,7 +1079,9 @@ static struct mp_image *render_interp(struct mp_filter *vf,
         talloc_free(out);
         return NULL;
     }
-    int ret = p->api.infer_rife(p->aji, &fa, &fb, t, &fout, p->stream);
+    int ret = p->scene_decision != -1 && p->api.infer_rife_with_scene
+        ? p->api.infer_rife_with_scene(p->aji, &fa, &fb, t, &fout, p->stream, p->scene_decision)
+        : p->api.infer_rife(p->aji, &fa, &fb, t, &fout, p->stream);
     if (ret == AJI_SCENE) {
         talloc_free(out);
         return mp_image_new_ref(a);
@@ -1279,7 +1309,9 @@ static struct mp_image *interp_source(struct mp_filter *vf,
         fout.stride[i] = out->stride[i];
     }
 
-    int ret = p->api.infer_rife(p->aji, &fa, &fb, t, &fout, p->stream);
+    int ret = p->scene_decision != -1 && p->api.infer_rife_with_scene
+        ? p->api.infer_rife_with_scene(p->aji, &fa, &fb, t, &fout, p->stream, p->scene_decision)
+        : p->api.infer_rife(p->aji, &fa, &fb, t, &fout, p->stream);
     if (ret == AJI_SCENE) {
         talloc_free(out);
         return mp_image_new_ref(a);
@@ -1597,6 +1629,7 @@ static void vf_animejanai_process(struct mp_filter *vf)
         bool failed = false;
         if (p->rife_prev && p->rife_prev->pts != MP_NOPTS_VALUE &&
             src->pts != MP_NOPTS_VALUE && src->pts > p->rife_prev->pts) {
+            p->scene_decision = scene_pair(vf, p->rife_prev, cur_src);
             while (p->rife_acc <= p->rife_num && n < 8) {
                 struct mp_image *frame;
                 double pts;
@@ -1692,6 +1725,7 @@ static void vf_animejanai_process(struct mp_filter *vf)
         bool emitted_cur = true;
         if (p->rife_prev && p->rife_prev->pts != MP_NOPTS_VALUE &&
             out->pts != MP_NOPTS_VALUE && out->pts > p->rife_prev->pts) {
+            p->scene_decision = scene_pair(vf, p->rife_prev, out);
             // Emit the output-grid points due within this input pair:
             // offsets acc, acc+den, ... (in 1/num units) while <= num.
             // An offset of exactly num is the right source frame itself;
@@ -1763,6 +1797,15 @@ static bool vf_animejanai_command(struct mp_filter *vf,
     struct priv *p = vf->priv;
     if (cmd->type != MP_FILTER_COMMAND_TEXT || !cmd->cmd)
         return false;
+    if (strcmp(cmd->cmd, "scene-map") == 0 && cmd->arg) {
+        if (!*cmd->arg) {
+            ajn_scene_destroy(p->scene); p->scene = NULL;
+            p->scene_decision = -1;
+            return true;
+        }
+        if (!p->scene) p->scene = ajn_scene_create(vf->log);
+        return ajn_scene_connect(p->scene, cmd->arg);
+    }
     if (strcmp(cmd->cmd, "poll") == 0) {
         // No-op wakeup: while playback is paused no frames flow, so
         // process() (and with it the background-build completion poll)
@@ -1792,6 +1835,8 @@ static void uninit(struct mp_filter *vf)
     struct priv *p = vf->priv;
 
     flush_frames(vf);
+    ajn_scene_destroy(p->scene);
+    p->scene = NULL;
     talloc_free(p->queue);
     if (p->aji)
         p->api.destroy(&p->aji);
@@ -1919,6 +1964,8 @@ static struct mp_filter *vf_animejanai_create(struct mp_filter *parent,
         p->api.pre_resize = aji_lib_sym(p->api.handle, "aji_pre_resize");
         p->api.resize = aji_lib_sym(p->api.handle, "aji_resize");
         p->api.infer_rife = aji_lib_sym(p->api.handle, "aji_infer_rife");
+        p->api.rife_scene_supported = aji_lib_sym(p->api.handle, "aji_rife_scene_supported");
+        p->api.infer_rife_with_scene = aji_lib_sym(p->api.handle, "aji_infer_rife_with_scene");
         p->api.poll = aji_lib_sym(p->api.handle, "aji_poll");
         p->api.current_log = aji_lib_sym(p->api.handle, "aji_current_log");
         p->api.last_error = aji_lib_sym(p->api.handle, "aji_last_error");

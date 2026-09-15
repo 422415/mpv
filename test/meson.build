@@ -102,6 +102,12 @@ test('ajn-sample-shared', ajn_sample_shared)
 if win32
     ajn_sample_lifetime = executable('ajn-sample-lifetime', files('ajn_sample_lifetime.c'), include_directories: incdir)
     test('ajn-sample-lifetime', ajn_sample_lifetime)
+    if features['cuda-hwaccel']
+        ajn_scene = executable('ajn-scene', 'ajn_scene.c', include_directories: incdir,
+            objects: libmpv.extract_objects('video/filter/ajn_scene.c', 'video/mp_image_pool.c'),
+            dependencies: [libavutil, libswscale, zimg, libplacebo], link_with: [img_utils, test_utils])
+        test('ajn-scene', ajn_scene)
+    endif
 endif
 
 timer = executable('timer', files('timer.c'), include_directories: incdir, link_with: test_utils)
