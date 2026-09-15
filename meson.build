@@ -79,6 +79,7 @@ sources = files(
     'audio/out/buffer.c',
 
     ## Core
+    'common/ajn_probe.c',
     'common/av_common.c',
     'common/av_log.c',
     'common/codecs.c',
