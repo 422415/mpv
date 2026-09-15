@@ -143,6 +143,7 @@ MPV_EXPORT int mpv_ajn_probe_v1(void *opaque,
         node_map_add_flag(track, "forced", (stream->disposition & AV_DISPOSITION_FORCED) != 0);
         seconds(track, "startSeconds", stream->start_time, stream->time_base);
         if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+            optional_string(track, "pixelFormat", p->format >= 0 ? av_get_pix_fmt_name(p->format) : NULL);
             positive_integer(track, "width", p->width);
             positive_integer(track, "height", p->height);
             AVRational sar = av_guess_sample_aspect_ratio(format, stream, NULL);
