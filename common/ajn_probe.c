@@ -96,7 +96,7 @@ MPV_EXPORT int mpv_ajn_probe_v1(void *opaque,
     format->io_open = deny_open;
     format->interrupt_callback = (AVIOInterruptCB){cancel, opaque};
     format->max_streams = 128;
-    av_dict_set(&options, "format_whitelist", "matroska,webm,mov,avi,mpegts", 0);
+    av_dict_set(&options, "format_whitelist", "matroska,webm,mov,avi,mpegts,srt,ass,webvtt", 0);
     av_dict_set(&options, "protocol_whitelist", "", 0);
     av_dict_set(&options, "probesize", "8388608", 0);
     av_dict_set(&options, "analyzeduration", "5000000", 0);
