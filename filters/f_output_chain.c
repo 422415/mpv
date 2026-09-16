@@ -184,7 +184,7 @@ static void user_wrapper_process(struct mp_filter *f)
     mp_assert(u->name);
 
     if (!u->failed && mp_filter_has_failed(u->f)) {
-        if (u == p->convert_wrapper) {
+        if (u == p->convert_wrapper || u->f->failure_is_fatal) {
             // This is a fuckup we can't ignore.
             MP_FATAL(p, "Cannot convert decoder/filter output to any format "
                      "supported by the output.\n");
@@ -202,7 +202,7 @@ static void user_wrapper_process(struct mp_filter *f)
         // if this wrapper forwarded EOF into the inner filter, that EOF may
         // be lost. Reset filter may have discarded this frame from failed filter.
         // Synthesize EOF so downstream doesn't stall indefinitely.
-        if (u == p->convert_wrapper || u->in_eof) {
+        if (u == p->convert_wrapper || u->f->failure_is_fatal || u->in_eof) {
             if (mp_pin_in_needs_data(f->ppins[1])) {
                 if (!u->error_eof_sent)
                     mp_pin_in_write(f->ppins[1], MP_EOF_FRAME);

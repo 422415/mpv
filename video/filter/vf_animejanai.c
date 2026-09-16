@@ -149,6 +149,7 @@ struct opts {
     bool skip_seek_pre_target;
     bool output_444;
     int queue_depth;
+    int stream_mode; // 0 ordinary, 1 cached-only stream, 2 prepare, 3 check
 };
 
 #define MAX_DEPTH 4
@@ -535,6 +536,20 @@ static void update_depth(struct mp_filter *vf)
 // (Re)configure the shim for the current stream params and slot. Updates
 // out_params (and thus the output pool geometry). May block on first-play
 // engine builds, like the legacy pipeline.
+// Versioned, path-free signal for the trusted libmpv host. Never forward raw
+// inference logs to addons. Preparation/check modes produce no video frames.
+#define AJN_STREAM_VERSION 1
+static void stream_status(struct mp_filter *vf, const char *state)
+{
+    struct priv *p = vf->priv;
+    if (!p->opts->stream_mode)
+        return;
+    MP_INFO(vf, "AJN_STREAM_V1 %s %s %d %d %d %d %d %d\n", state,
+            p->is_d3d11 ? "DirectML" : "TensorRT", p->cur_slot,
+            p->params.w, p->params.h, p->out_params.w, p->out_params.h,
+            p->rife_on ? 1 : 0);
+}
+
 static bool configure_aji(struct mp_filter *vf)
 {
     struct priv *p = vf->priv;
@@ -553,10 +568,23 @@ static bool configure_aji(struct mp_filter *vf)
     int ret = p->api.configure(p->aji, p->params.w, p->params.h, p->fps,
                                &ow, &oh);
     if (ret < 0) {
+        const char *error = p->api.last_error(p->aji);
+        stream_status(vf, strstr(error, "AJN_ENGINE_MISSING") ? "engineMissing" :
+                          strstr(error, "AJN_ENGINE_INCOMPATIBLE") ? "engineIncompatible" : "failed");
         MP_ERR(vf, "configure failed: %s\n", p->api.last_error(p->aji));
         return false;
     }
     write_stats(vf);
+
+    const char *details = p->api.current_log(p->aji);
+    if (p->opts->stream_mode && strstr(details, "Engine build FAILED")) {
+        stream_status(vf, "preparationFailed");
+        return false;
+    }
+    if (p->opts->stream_mode && strstr(details, "Building TensorRT engine")) {
+        stream_status(vf, "building");
+        return true; // Only preparation can reach here on the matching backend.
+    }
 
     int rn = 0, rd = 0;
     p->rife_on = false;
@@ -596,6 +624,7 @@ static bool configure_aji(struct mp_filter *vf)
         // to the input geometry above).
         p->out_fmt = p->aji_fmt;
         update_depth(vf);
+        stream_status(vf, p->rife_on ? "active" : "bypass");
         return true;  // no scaling chain; rife (if any) still applies
     }
 
@@ -657,7 +686,8 @@ static bool configure_aji(struct mp_filter *vf)
     }
     update_depth(vf);
     MP_VERBOSE(vf, "Configured slot %d: %dx%d -> %dx%d (depth %d)\n",
-               p->cur_slot, p->params.w, p->params.h, ow, oh, p->depth);
+                p->cur_slot, p->params.w, p->params.h, ow, oh, p->depth);
+    stream_status(vf, "active");
     return true;
 }
 
@@ -1455,7 +1485,7 @@ static void vf_animejanai_process(struct mp_filter *vf)
                 .trtexec_env = env,
                 .slot = p->pending_slot,
                 .rife_model_dir = p->path.rife_model_dir,
-                .async_build = 1,
+                .async_build = p->opts->stream_mode == 1 || p->opts->stream_mode == 3 ? 2 : 1,
                 .engine_path = p->path.engine,
                 .max_width = p->params.w,
                 .max_height = p->params.h,
@@ -1576,6 +1606,11 @@ static void vf_animejanai_process(struct mp_filter *vf)
             return;
         }
     }
+
+    // A preparation/check host polls the filter while it retains its first
+    // input. No frame can escape before engines have been checked/prepared.
+    if (p->opts->stream_mode >= 2)
+        return;
 
     // Extra RIFE outputs first: they go straight to the out pin without
     // consuming input (the refqueue isn't touched while any are pending,
@@ -1907,6 +1942,7 @@ static struct mp_filter *vf_animejanai_create(struct mp_filter *parent,
 
     struct priv *p = f->priv;
     p->opts = talloc_steal(p, options);
+    f->failure_is_fatal = p->opts->stream_mode != 0;
     p->queue = mp_refqueue_alloc(f);
     p->cur_slot = p->pending_slot = p->opts->slot;
 
@@ -1968,6 +2004,13 @@ static struct mp_filter *vf_animejanai_create(struct mp_filter *parent,
         p->api.infer_rife_with_scene = aji_lib_sym(p->api.handle, "aji_infer_rife_with_scene");
         p->api.poll = aji_lib_sym(p->api.handle, "aji_poll");
         p->api.current_log = aji_lib_sym(p->api.handle, "aji_current_log");
+        if (p->opts->stream_mode) {
+            int (*version)(void) = aji_lib_sym(p->api.handle, "aji_stream_policy_version");
+            if (!version || version() != AJN_STREAM_VERSION) {
+                MP_ERR(f, "AJN_STREAM_POLICY_UNAVAILABLE\n");
+                goto fail;
+            }
+        }
         p->api.last_error = aji_lib_sym(p->api.handle, "aji_last_error");
         p->api.destroy = aji_lib_sym(p->api.handle, "aji_destroy");
         if (!p->api.create || !p->api.set_slot || !p->api.configure ||
@@ -2028,6 +2071,7 @@ static const m_option_t vf_opts_fields[] = {
     {"skip-seek-pre-target", OPT_BOOL(skip_seek_pre_target)},
     {"output-444", OPT_BOOL(output_444)},
     {"queue-depth", OPT_INT(queue_depth), M_RANGE(1, MAX_DEPTH)},
+    {"stream-mode", OPT_CHOICE(stream_mode, {"normal", 0}, {"required", 1}, {"prepare", 2}, {"check", 3})},
     {0}
 };
 
