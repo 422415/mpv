@@ -544,10 +544,10 @@ static void stream_status(struct mp_filter *vf, const char *state)
     struct priv *p = vf->priv;
     if (!p->opts->stream_mode)
         return;
-    MP_INFO(vf, "AJN_STREAM_V1 %s %s %d %d %d %d %d %d\n", state,
+    MP_INFO(vf, "AJN_STREAM_V1 %s %s %d %d %d %d %d %d %.6f\n", state,
             p->is_d3d11 ? "DirectML" : "TensorRT", p->cur_slot,
             p->params.w, p->params.h, p->out_params.w, p->out_params.h,
-            p->rife_on ? 1 : 0);
+            p->rife_on ? 1 : 0, p->fps * (p->rife_on ? (double)p->rife_num / p->rife_den : 1));
 }
 
 static bool configure_aji(struct mp_filter *vf)
@@ -1609,7 +1609,7 @@ static void vf_animejanai_process(struct mp_filter *vf)
 
     // A preparation/check host polls the filter while it retains its first
     // input. No frame can escape before engines have been checked/prepared.
-    if (p->opts->stream_mode >= 2)
+    if (p->opts->stream_mode >= 2 && p->configured)
         return;
 
     // Extra RIFE outputs first: they go straight to the out pin without

@@ -10,4 +10,8 @@ MPV_EXPORT int mpv_ajn_probe_v1(void *opaque,
     int64_t (*seek)(void *, int64_t, int), int (*cancel)(void *),
     int can_seek, char **json);
 MPV_EXPORT void mpv_ajn_probe_free_v1(char *json);
+// Private trusted-host readiness probe. Opens and closes the actual selected
+// hardware encoder using a bounded, validated output combination.
+MPV_EXPORT int mpv_ajn_encoder_check_v1(const char *name, const char *options,
+    int width, int height, int bit_depth, double fps);
 #endif

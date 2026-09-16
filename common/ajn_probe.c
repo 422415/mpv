@@ -17,6 +17,7 @@
 #include <libavutil/display.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/opt.h>
 
 #include "include/mpv/client.h"
 #include "common/ajn_probe.h"
@@ -28,6 +29,39 @@ static int deny_open(AVFormatContext *ctx, AVIOContext **pb, const char *url,
                      int flags, AVDictionary **options)
 {
     return AVERROR(EACCES);
+}
+
+MPV_EXPORT int mpv_ajn_encoder_check_v1(const char *name, const char *options,
+    int width, int height, int bit_depth, double fps)
+{
+    if (!name || !options || strlen(options) > 1024 || width < 2 || height < 2 ||
+        width > 8192 || height > 8192 || !isfinite(fps) || fps <= 0 || fps > 480 ||
+        (bit_depth != 8 && bit_depth != 10))
+        return AVERROR(EINVAL);
+    if (strcmp(name, "h264_nvenc") && strcmp(name, "hevc_nvenc") &&
+        strcmp(name, "av1_nvenc") && strcmp(name, "h264_amf") && strcmp(name, "hevc_amf"))
+        return AVERROR(EINVAL);
+    const AVCodec *codec = avcodec_find_encoder_by_name(name);
+    if (!codec)
+        return AVERROR_ENCODER_NOT_FOUND;
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx)
+        return AVERROR(ENOMEM);
+    ctx->width = width;
+    ctx->height = height;
+    ctx->pix_fmt = bit_depth == 8 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_P010LE;
+    ctx->framerate = av_d2q(fps, 1000000);
+    ctx->time_base = av_inv_q(ctx->framerate);
+    AVDictionary *opts = NULL;
+    int ret = av_dict_parse_string(&opts, options, "=", ",", 0);
+    if (ret >= 0)
+        ret = avcodec_open2(ctx, codec, &opts);
+    // An unused option would make this readiness test differ from playback.
+    if (ret >= 0 && av_dict_count(opts))
+        ret = AVERROR_OPTION_NOT_FOUND;
+    av_dict_free(&opts);
+    avcodec_free_context(&ctx);
+    return ret;
 }
 
 static void optional_string(mpv_node *node, const char *key, const char *value)
