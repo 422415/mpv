@@ -173,6 +173,10 @@ void uninit_video_chain(struct MPContext *mpctx)
 
         mp_notify(mpctx, MPV_EVENT_VIDEO_RECONFIG, NULL);
     }
+    if (mpctx->display_rate_resume_time) {
+        mpctx->display_rate_resume_time = 0;
+        update_internal_pause_state(mpctx);
+    }
 }
 
 int init_video_decoder(struct MPContext *mpctx, struct track *track)
@@ -1232,12 +1236,25 @@ void write_video(struct MPContext *mpctx)
                                      opts->playback_speed, &rate) &&
             vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
         {
-            // Pause both clocks only when a mode change is actually required.
-            // The Windows call can block while the driver changes modes.
-            set_pause_state(mpctx, true);
+            // Hold both clocks without changing the user's pause setting.
+            // A nonzero timestamp holds playback even during the blocking
+            // Windows call; the actual settling deadline starts on success.
+            mpctx->display_rate_resume_time = mp_time_sec();
+            update_internal_pause_state(mpctx);
+            MP_VERBOSE(mpctx, "Pausing playback for display refresh change.\n");
             rate.apply = true;
-            vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate);
-            set_pause_state(mpctx, false);
+            int result = vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate);
+            double delay = vo->opts->display_rate_match_delay;
+            if (result == VO_TRUE && delay > 0) {
+                mpctx->display_rate_resume_time = mp_time_sec() + delay;
+                MP_VERBOSE(mpctx, "Display refresh changed; holding playback for %.3f seconds.\n",
+                           delay);
+                mp_set_timeout(mpctx, delay);
+            } else {
+                mpctx->display_rate_resume_time = 0;
+                update_internal_pause_state(mpctx);
+            }
+            return;
         }
     } else {
         mpctx->display_cadence = (struct mp_display_cadence){0};

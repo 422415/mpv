@@ -437,6 +437,7 @@ typedef struct MPContext {
     int remaining_ab_loops;
 
     bool paused_for_cache;
+    double display_rate_resume_time; // nonzero while refresh switching/settling
     bool demux_underrun;
     double cache_stop_time;
     int cache_buffer;

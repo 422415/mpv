@@ -158,7 +158,8 @@ void update_core_idle_state(struct MPContext *mpctx)
 
 bool get_internal_paused(struct MPContext *mpctx)
 {
-    return mpctx->opts->pause || mpctx->paused_for_cache;
+    return mpctx->opts->pause || mpctx->paused_for_cache ||
+           mpctx->display_rate_resume_time != 0;
 }
 
 // The value passed here is the new value for mpctx->opts->pause
@@ -201,6 +202,24 @@ void set_pause_state(struct MPContext *mpctx, bool user_pause)
 void update_internal_pause_state(struct MPContext *mpctx)
 {
     set_pause_state(mpctx, mpctx->opts->pause);
+}
+
+static void handle_display_rate_pause(struct MPContext *mpctx)
+{
+    if (!mpctx->display_rate_resume_time)
+        return;
+
+    double remaining = mpctx->display_rate_resume_time - mp_time_sec();
+    if (remaining <= 0 || !mpctx->opts->vo->display_rate_match) {
+        mpctx->display_rate_resume_time = 0;
+        MP_VERBOSE(mpctx, "Display refresh settling pause finished.\n");
+        // A user pause or cache pause still applies after our hold is released.
+        update_internal_pause_state(mpctx);
+    } else {
+        // Keep processing commands, window events, and cache updates while
+        // waiting. Never block the playback thread with a settling sleep.
+        mp_set_timeout(mpctx, remaining);
+    }
 }
 
 void update_screensaver_state(struct MPContext *mpctx)
@@ -1302,6 +1321,8 @@ void run_playloop(struct MPContext *mpctx)
     handle_cursor_autohide(mpctx);
     handle_vo_events(mpctx);
     handle_command_updates(mpctx);
+
+    handle_display_rate_pause(mpctx);
 
     if (mpctx->lavfi && mp_filter_has_failed(mpctx->lavfi))
         mpctx->stop_play = AT_END_OF_FILE;

@@ -1331,9 +1331,10 @@ Video
     mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
     timings fit a fixed refresh grid perfectly.
 
-    Only the display containing the player is changed. Audio/video pause while
-    Windows applies a switch; a TV may remain black briefly afterward while it
-    reacquires the signal. Changes are at least five seconds apart. No switching
+    Only the display containing the player is changed. Audio/video pause before
+    Windows applies a switch, then stay paused for ``--display-rate-match-delay``
+    seconds after it succeeds, before resuming automatically. A manual pause
+    during this wait is preserved. Changes are at least five seconds apart. No switching
     occurs while minimized, paused, playing backward, or encoding. The original
     refresh is restored at video EOF, stop, normal exit or disabling the option.
     A subsequent external mode change is respected and stops automatic changes
@@ -1341,6 +1342,15 @@ Video
 
     ``test`` logs decisions and asks Windows to validate the selected mode,
     without applying it. It also operates in minimized windows for testing.
+
+``--display-rate-match-delay=<seconds>`` (Windows only)
+    Settling pause after a successful automatic display refresh switch (default:
+    3, range: 0 to 30). The delay starts when Windows finishes applying the mode.
+    A TV may need additional time to reacquire its signal; this is a timed wait,
+    not detection of when the panel shows a picture. Increase it for a slower TV.
+    Playback controls remain responsive, and a manual pause remains in effect
+    after the wait. Failed changes and test-mode decisions do not add a delay.
+    Setting 0 resumes as soon as the Windows call completes.
 
 ``--display-fps-override=<fps>``
     Set the display FPS used with the ``--video-sync=display-*`` modes. By
