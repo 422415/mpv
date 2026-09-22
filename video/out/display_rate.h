@@ -65,16 +65,23 @@ static inline bool mp_display_cadence_sample(struct mp_display_cadence *c,
     return c->confirmations == 2;
 }
 
-// Prefer the lowest exact multiple for CFR. Otherwise use the highest available
-// progressive mode at the existing resolution. Do not mistake 24 for 23.976.
+// Prefer the lowest exact multiple for CFR, then a near multiple (for example,
+// 24 Hz for 23.976 fps on displays without fractional modes). Exact matches
+// always win. Otherwise use the highest available progressive mode.
 static inline double mp_display_rate_score(struct mp_display_rate rate, double hz)
 {
     if (!(hz > 1) || !(rate.fps > 0))
         return -1;
     double multiple = round(hz / rate.fps);
-    if (!rate.variable && multiple >= 1 &&
-        fabs(hz / (rate.fps * multiple) - 1) < 0.0005)
-        return 1000000 - hz;
+    if (!rate.variable && multiple >= 1) {
+        double error = fabs(hz / (rate.fps * multiple) - 1);
+        if (error < 0.0005)
+            return 1000000 - hz;
+        // Allow NTSC/integer pairs plus millisecond timestamp rounding, but
+        // never PAL/NTSC mismatches such as 25 fps on a 24 Hz display.
+        if (error < 0.002)
+            return 500000 - hz;
+    }
     return hz;
 }
 

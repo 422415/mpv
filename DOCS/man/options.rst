@@ -1321,9 +1321,13 @@ Video
     video timestamps, interpolate frames, or alter ``--video-sync``.
 
     Stable sections select the lowest supported progressive refresh rate that
-    is an exact multiple of their cadence. Variable sections, and fixed rates
-    without an exact match, select the highest supported progressive rate at
-    the current resolution, orientation and desktop bit depth. This accommodates
+    is an exact multiple of their cadence. If none exists, a near multiple
+    (within 0.2%) is preferred, for example 24 Hz for 23.976 fps when fractional
+    modes are unavailable. Exact multiples always take priority over near ones.
+    A near match retains a small timing difference; this option does not enable
+    playback speed correction. Variable sections, and fixed rates without an
+    exact or near match, select the highest supported progressive rate at the
+    current resolution, orientation and desktop bit depth. This accommodates
     mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
     timings fit a fixed refresh grid perfectly.
 
