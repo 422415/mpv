@@ -31,6 +31,7 @@
 #include "sub/osd.h"
 #include "video/mp_image.h"
 #include "video/out/vo.h"
+#include "video/out/display_rate.h"
 #include "osdep/als.h"
 #include "demux/stheader.h"
 
@@ -395,6 +396,7 @@ typedef struct MPContext {
     // The newest frame is at index 0.
     struct frame_info *past_frames;
     int num_past_frames;
+    struct mp_display_cadence display_cadence;
 
     double last_idle_tick;
     double next_cache_update;

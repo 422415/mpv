@@ -19,6 +19,7 @@ typedef struct mp_vo_opts {
     bool title_bar;
     bool all_workspaces;
     bool window_minimized;
+    int display_rate_match;
     bool window_maximized;
     int focus_on;
 

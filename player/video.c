@@ -115,6 +115,7 @@ void reset_video_state(struct MPContext *mpctx)
     mpctx->video_pts = MP_NOPTS_VALUE;
     mpctx->last_frame_duration = 0;
     mpctx->num_past_frames = 0;
+    mpctx->display_cadence = (struct mp_display_cadence){0};
     mpctx->total_avsync_change = 0;
     mpctx->last_av_difference = 0;
     mpctx->mistimed_frames_total = 0;
@@ -163,6 +164,7 @@ static void vo_chain_uninit(struct vo_chain *vo_c)
 void uninit_video_chain(struct MPContext *mpctx)
 {
     if (mpctx->vo_chain) {
+        vo_control(mpctx->vo_chain->vo, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
         reset_video_state(mpctx);
         vo_chain_uninit(mpctx->vo_chain);
         mpctx->vo_chain = NULL;
@@ -1131,6 +1133,7 @@ void write_video(struct MPContext *mpctx)
             if (mpctx->time_frame <= 0 || !has_frame) {
                 MP_VERBOSE(mpctx, "video EOF reached\n");
                 mpctx->video_status = STATUS_EOF;
+                vo_control(vo, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
             }
         }
 
@@ -1215,6 +1218,29 @@ void write_video(struct MPContext *mpctx)
         mp_mutex_lock(&vo->params_mutex);
         mp_image_params_update_dynamic(vo->params, p, vo->has_peak_detect_values);
         mp_mutex_unlock(&vo->params_mutex);
+    }
+
+    // Observe each unique filter-output PTS, including frames the VO may later
+    // drop. Wall-clock sampling would confuse slow rendering with low-rate video.
+    if (vo->opts->display_rate_match && !mpctx->paused && !vo_c->is_sparse &&
+        mpctx->play_dir > 0 && !opts->untimed && !mpctx->encode_lavc_ctx &&
+        mpctx->next_frames[0]->pts != MP_NOPTS_VALUE)
+    {
+        struct mp_display_rate rate;
+        if (mp_display_cadence_sample(&mpctx->display_cadence,
+                                     mpctx->next_frames[0]->pts,
+                                     opts->playback_speed, &rate) &&
+            vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
+        {
+            // Pause both clocks only when a mode change is actually required.
+            // The Windows call can block while the driver changes modes.
+            set_pause_state(mpctx, true);
+            rate.apply = true;
+            vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate);
+            set_pause_state(mpctx, false);
+        }
+    } else {
+        mpctx->display_cadence = (struct mp_display_cadence){0};
     }
 
     mpctx->time_frame -= get_relative_time(mpctx);

@@ -1313,6 +1313,31 @@ Video
       frame, so if this is not done, there is some likeliness that the VO has
       to drop some frames if rendering the first frame takes longer than needed.
 
+``--display-rate-match=<no|yes|test>`` (Windows only)
+    Experimental automatic physical display refresh matching (default: ``no``).
+    Measures filter-output frame timestamps, adjusted for playback speed, in
+    two-second windows. Two agreeing windows are required before acting; brief
+    cadence changes are ignored. Seeks restart detection. This does not change
+    video timestamps, interpolate frames, or alter ``--video-sync``.
+
+    Stable sections select the lowest supported progressive refresh rate that
+    is an exact multiple of their cadence. Variable sections, and fixed rates
+    without an exact match, select the highest supported progressive rate at
+    the current resolution, orientation and desktop bit depth. This accommodates
+    mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
+    timings fit a fixed refresh grid perfectly.
+
+    Only the display containing the player is changed. Audio/video pause while
+    Windows applies a switch; a TV may remain black briefly afterward while it
+    reacquires the signal. Changes are at least five seconds apart. No switching
+    occurs while minimized, paused, playing backward, or encoding. The original
+    refresh is restored at video EOF, stop, normal exit or disabling the option.
+    A subsequent external mode change is respected and stops automatic changes
+    for that playback. Forced process termination cannot guarantee restoration.
+
+    ``test`` logs decisions and asks Windows to validate the selected mode,
+    without applying it. It also operates in minimized windows for testing.
+
 ``--display-fps-override=<fps>``
     Set the display FPS used with the ``--video-sync=display-*`` modes. By
     default, a detected value is used. Keep in mind that setting an incorrect

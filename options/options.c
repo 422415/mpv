@@ -156,6 +156,8 @@ static const m_option_t mp_vo_opt_list[] = {
     {"monitorpixelaspect", OPT_FLOAT(monitor_pixel_aspect),
         M_RANGE(1.0/32.0, 32.0)},
     {"fullscreen", OPT_BOOL(fullscreen)},
+    {"display-rate-match", OPT_CHOICE(display_rate_match,
+        {"no", 0}, {"yes", 1}, {"test", 2})},
     {"fs", OPT_ALIAS("fullscreen")},
     {"input-cursor-passthrough", OPT_BOOL(cursor_passthrough)},
     {"native-keyrepeat", OPT_BOOL(native_keyrepeat)},
