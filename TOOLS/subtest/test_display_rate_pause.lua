@@ -3,9 +3,11 @@
 -- Run with --display-rate-match=yes --display-rate-match-delay=3 and this script.
 -- Add --script-opts=display_pause_test-manual_pause=yes to check user pause.
 -- Optional display_pause_test-screenshot=PATH saves held/resumed OSD pictures.
+-- For saved-position resume, pass display_pause_test-expected_position=SECONDS
+-- from the watch-later file and reopen without --start.
 local mp = require 'mp'
 local options = require 'mp.options'
-local opts = {manual_pause = false, screenshot = ''}
+local opts = {manual_pause = false, screenshot = '', expected_position = 0}
 options.read_options(opts, 'display_pause_test')
 
 local started, position, resumed, finished
@@ -27,8 +29,9 @@ mp.register_event('log-message', function(event)
         return
     end
     local pts = mp.get_property_number('time-pos', 0)
-    if pts > 0.1 then
-        finish(false, 'refresh hold started after playback had already advanced')
+    if math.abs(pts - opts.expected_position) > 0.15 then
+        finish(false, string.format('hold at %.3fs, expected saved/start position %.3fs',
+                                    pts, opts.expected_position))
         return
     end
     started, position = mp.get_time(), pts
