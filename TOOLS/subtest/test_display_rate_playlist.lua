@@ -12,7 +12,7 @@ options.read_options(opts, 'display_playlist_test')
 local loaded, switches, restores = 0, 0, 0
 local original, finishing, failed
 
-mp.request_log_messages('info')
+mp.enable_messages('info')
 mp.register_event('log-message', function(event)
     if not event.prefix:find('/win32', 1, true) then return end
     if event.text:find('Matched ', 1, true) then switches = switches + 1 end
