@@ -1035,6 +1035,10 @@ static void handle_keep_open(struct MPContext *mpctx)
         (opts->keep_open == 2 ||
         (!playlist_get_next(mpctx->playlist, 1) && opts->loop_times == 1)))
     {
+        // Playback is ending on a retained last frame, not advancing. The VO
+        // remains alive, so its normal destruction will not restore the mode.
+        if (mpctx->video_out)
+            vo_control(mpctx->video_out, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
         mpctx->stop_play = KEEP_PLAYING;
         if (mpctx->vo_chain) {
             if (!vo_has_frame(mpctx->video_out)) { // EOF not reached normally
@@ -1081,6 +1085,11 @@ int handle_force_window(struct MPContext *mpctx, bool force)
     // Don't interfere with real video playback
     if (mpctx->vo_chain && !stalled_video)
         return 0;
+
+    // Also release the video mode when switching to audio-only playback or
+    // disabling video while retaining a forced window. Not during file loading.
+    if (act && !mpctx->vo_chain && mpctx->video_out)
+        vo_control(mpctx->video_out, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
 
     if (!mpctx->opts->force_vo) {
         if (act && !mpctx->vo_chain)

@@ -164,7 +164,6 @@ static void vo_chain_uninit(struct vo_chain *vo_c)
 void uninit_video_chain(struct MPContext *mpctx)
 {
     if (mpctx->vo_chain) {
-        vo_control(mpctx->vo_chain->vo, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
         reset_video_state(mpctx);
         vo_chain_uninit(mpctx->vo_chain);
         mpctx->vo_chain = NULL;
@@ -1137,7 +1136,6 @@ void write_video(struct MPContext *mpctx)
             if (mpctx->time_frame <= 0 || !has_frame) {
                 MP_VERBOSE(mpctx, "video EOF reached\n");
                 mpctx->video_status = STATUS_EOF;
-                vo_control(vo, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
             }
         }
 

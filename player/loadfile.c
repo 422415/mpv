@@ -2292,8 +2292,13 @@ void mp_play_files(struct MPContext *mpctx)
             new_entry = mpctx->playlist->current;
         }
 
-        if (!new_entry)
+        if (!new_entry) {
             mpctx->playlist->playlist_completed = true;
+            // An episode's EOF/decoder teardown is not the end of a playback
+            // session. Keep the matched mode while advancing to another file.
+            if (mpctx->video_out)
+                vo_control(mpctx->video_out, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
+        }
 
         mpctx->playlist->current = new_entry;
         mpctx->playlist->current_was_replaced = false;

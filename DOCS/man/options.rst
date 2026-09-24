@@ -1335,8 +1335,13 @@ Video
     Windows applies a switch, then stay paused for ``--display-rate-match-delay``
     seconds after it succeeds, before resuming automatically. A manual pause
     during this wait is preserved. Changes are at least five seconds apart. No switching
-    occurs while minimized, paused, playing backward, or encoding. The original
-    refresh is restored at video EOF, stop, normal exit or disabling the option.
+    occurs while minimized, paused, playing backward, or encoding. The matched
+    refresh is retained across consecutive playlist entries and file loops, so
+    episodes with matching cadence do not switch back to the desktop rate in
+    between. A different cadence can switch directly to its matching mode. The
+    original refresh is restored when the playlist finishes (including keeping
+    the last frame open), playback stops, video is disabled, the player exits
+    normally, or the option is disabled.
     A subsequent external mode change is respected and stops automatic changes
     for that playback. Forced process termination cannot guarantee restoration.
 
