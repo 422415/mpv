@@ -2,9 +2,10 @@
 -- rate from a CFR video. This changes the display mode and quits after testing.
 -- Run with --display-rate-match=yes --display-rate-match-delay=3 and this script.
 -- Add --script-opts=display_pause_test-manual_pause=yes to check user pause.
+-- Optional display_pause_test-screenshot=PATH saves held/resumed OSD pictures.
 local mp = require 'mp'
 local options = require 'mp.options'
-local opts = {manual_pause = false}
+local opts = {manual_pause = false, screenshot = ''}
 options.read_options(opts, 'display_pause_test')
 
 local started, position, resumed, finished
@@ -19,21 +20,35 @@ local function finish(ok, message)
     mp.commandv('quit', ok and 0 or 1)
 end
 
+mp.enable_messages('v')
+mp.register_event('log-message', function(event)
+    if finished or started or
+       not event.text:find('Display refresh changed; holding playback', 1, true) then
+        return
+    end
+    local pts = mp.get_property_number('time-pos', 0)
+    if pts > 0.1 then
+        finish(false, 'refresh hold started after playback had already advanced')
+        return
+    end
+    started, position = mp.get_time(), pts
+    delay = mp.get_property_number('display-rate-match-delay', 0)
+    if delay < 1 then
+        finish(false, 'this check requires a settling delay of at least 1s')
+        return
+    end
+    mp.msg.info(string.format('Settling hold detected at %.3fs', pts))
+    if opts.manual_pause then mp.set_property_bool('pause', true) end
+    if opts.screenshot ~= '' then
+        mp.add_timeout(0.7, function()
+            mp.commandv('screenshot-to-file', opts.screenshot .. '-held.png', 'window')
+        end)
+    end
+end)
+
 mp.observe_property('core-idle', 'bool', function(_, idle)
     if finished then return end
-    local pts = mp.get_property_number('time-pos', 0)
-    if not started and idle and pts > 1 and
-       not mp.get_property_bool('pause') and
-       not mp.get_property_bool('paused-for-cache') then
-        started, position = mp.get_time(), pts
-        delay = mp.get_property_number('display-rate-match-delay', 0)
-        if delay < 1 then
-            finish(false, 'this check requires a settling delay of at least 1s')
-            return
-        end
-        mp.msg.info(string.format('Settling hold detected at %.3fs', pts))
-        if opts.manual_pause then mp.set_property_bool('pause', true) end
-    elseif started and not idle and not resumed then
+    if started and not idle and not resumed then
         if mp.get_time() - started < delay - 0.2 then
             finish(false, 'playback resumed before the settling delay elapsed')
         else
@@ -62,7 +77,10 @@ ticker = mp.add_periodic_timer(0.05, function()
         mp.set_property_bool('pause', false)
     end
     if resumed and pts > position + 0.5 then
-        finish(true, 'media time held during refresh settling, then resumed')
+        if opts.screenshot ~= '' then
+            mp.commandv('screenshot-to-file', opts.screenshot .. '-resumed.png', 'window')
+        end
+        finish(true, 'startup held before playback, then resumed after refresh settling')
     end
 end)
 

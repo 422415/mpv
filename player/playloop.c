@@ -212,6 +212,7 @@ static void handle_display_rate_pause(struct MPContext *mpctx)
     double remaining = mpctx->display_rate_resume_time - mp_time_sec();
     if (remaining <= 0 || !mpctx->opts->vo->display_rate_match) {
         mpctx->display_rate_resume_time = 0;
+        mpctx->osd_force_update = true;
         MP_VERBOSE(mpctx, "Display refresh settling pause finished.\n");
         // A user pause or cache pause still applies after our hold is released.
         update_internal_pause_state(mpctx);

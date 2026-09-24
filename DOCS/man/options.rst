@@ -1315,10 +1315,14 @@ Video
 
 ``--display-rate-match=<no|yes|test>`` (Windows only)
     Experimental automatic physical display refresh matching (default: ``no``).
-    Measures filter-output frame timestamps, adjusted for playback speed, in
-    two-second windows. Two agreeing windows are required before acting; brief
-    cadence changes are ignored. Seeks restart detection. This does not change
-    video timestamps, interpolate frames, or alter ``--video-sync``.
+    Uses the reported video frame rate, adjusted for playback speed, for an
+    initial choice before playback starts. This choice is provisional: live
+    filter-output timestamps can correct it for VFR or filters that change the
+    cadence. If no initial rate is available, only live detection is used.
+    Live detection uses two-second windows; two agreeing windows are required
+    before acting, so brief changes are ignored. Seeks restart live detection.
+    This does not change video timestamps, interpolate frames, or alter
+    ``--video-sync``.
 
     Stable sections select the lowest supported progressive refresh rate that
     is an exact multiple of their cadence. If none exists, a near multiple
@@ -1333,7 +1337,9 @@ Video
 
     Only the display containing the player is changed. Audio/video pause before
     Windows applies a switch, then stay paused for ``--display-rate-match-delay``
-    seconds after it succeeds, before resuming automatically. A manual pause
+    seconds after it succeeds, before resuming automatically. During this wait,
+    a notice appears at the top of the picture (unless OSD is disabled). The
+    first frame can be displayed while startup is held. A manual pause
     during this wait is preserved. Changes are at least five seconds apart. No switching
     occurs while minimized, paused, playing backward, or encoding. The matched
     refresh is retained across consecutive playlist entries and file loops, so

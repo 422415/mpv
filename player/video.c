@@ -174,6 +174,7 @@ void uninit_video_chain(struct MPContext *mpctx)
     }
     if (mpctx->display_rate_resume_time) {
         mpctx->display_rate_resume_time = 0;
+        mpctx->osd_force_update = true;
         update_internal_pause_state(mpctx);
     }
 }
@@ -1222,16 +1223,31 @@ void write_video(struct MPContext *mpctx)
         mp_mutex_unlock(&vo->params_mutex);
     }
 
-    // Observe each unique filter-output PTS, including frames the VO may later
-    // drop. Wall-clock sampling would confuse slow rendering with low-rate video.
+    // Match the reported rate before playback starts. Live output timestamps
+    // can subsequently correct this provisional choice for VFR or filters that
+    // change the cadence, without playing several seconds at the desktop rate.
     if (vo->opts->display_rate_match && !mpctx->paused && !vo_c->is_sparse &&
         mpctx->play_dir > 0 && !opts->untimed && !mpctx->encode_lavc_ctx &&
         mpctx->next_frames[0]->pts != MP_NOPTS_VALUE)
     {
-        struct mp_display_rate rate;
-        if (mp_display_cadence_sample(&mpctx->display_cadence,
-                                     mpctx->next_frames[0]->pts,
-                                     opts->playback_speed, &rate) &&
+        struct mp_display_rate rate = {0};
+        bool have_rate = false;
+        if (!vo_c->display_rate_initialized) {
+            vo_c->display_rate_initialized = true;
+            rate.fps = vo_c->filter->container_fps * opts->playback_speed;
+            have_rate = isfinite(rate.fps) && rate.fps > 0;
+            if (have_rate)
+                MP_VERBOSE(mpctx, "Initial display refresh selection: %.3f fps.\n",
+                           rate.fps);
+        }
+        // Observe each unique filter-output PTS, including frames the VO may
+        // later drop. Wall-clock sampling would mistake slow rendering for
+        // low-rate video. Unknown initial FPS uses this existing detector.
+        if (!have_rate)
+            have_rate = mp_display_cadence_sample(&mpctx->display_cadence,
+                                                 mpctx->next_frames[0]->pts,
+                                                 opts->playback_speed, &rate);
+        if (have_rate &&
             vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
         {
             // Hold both clocks without changing the user's pause setting.
@@ -1252,7 +1268,11 @@ void write_video(struct MPContext *mpctx)
                 mpctx->display_rate_resume_time = 0;
                 update_internal_pause_state(mpctx);
             }
-            return;
+            // Queue the first still frame so the matching message is visible
+            // while startup is held. Both clocks remain paused until the timer
+            // expires; an already-playing video keeps its current frame.
+            if (mpctx->video_status >= STATUS_READY)
+                return;
         }
     } else {
         mpctx->display_cadence = (struct mp_display_cadence){0};

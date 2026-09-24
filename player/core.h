@@ -179,6 +179,8 @@ struct vo_chain {
     bool is_sparse;
     bool sparse_eof_signalled;
 
+    bool display_rate_initialized;
+
     bool underrun;
     bool underrun_signaled;
 };
