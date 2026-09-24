@@ -10,7 +10,8 @@ local opts = {files = 3, switches = 2}
 options.read_options(opts, 'display_playlist_test')
 
 local loaded, switches, restores = 0, 0, 0
-local original, finishing, failed
+local original, finishing, failed, ending
+local finish
 
 mp.enable_messages('info')
 mp.register_event('log-message', function(event)
@@ -19,6 +20,7 @@ mp.register_event('log-message', function(event)
     if event.text:find('Restored original display refresh rate.', 1, true) then
         restores = restores + 1
         if loaded < opts.files then failed = 'restored before the last episode' end
+        finish()
     end
 end)
 
@@ -29,8 +31,11 @@ mp.register_event('file-loaded', function()
                              loaded, switches, restores))
 end)
 
-local function finish()
-    if finishing or loaded < opts.files then return end
+finish = function()
+    -- EOF can be delivered before the synchronous Windows restore finishes.
+    -- Wait for its log event too; a property read can otherwise block while
+    -- that event is still queued, producing a false zero-restores failure.
+    if finishing or not ending or loaded < opts.files or restores == 0 then return end
     finishing = true
     mp.add_timeout(0.5, function()
         local current = mp.get_property_number('display-fps', 0)
@@ -46,10 +51,11 @@ local function finish()
 end
 
 mp.observe_property('idle-active', 'bool', function(_, idle)
-    if idle then finish() end
+    if idle and loaded >= opts.files then ending = true; finish() end
 end)
 mp.observe_property('eof-reached', 'bool', function(_, eof)
     if eof and mp.get_property_number('playlist-pos', -1) == opts.files - 1 then
+        ending = true
         finish()
     end
 end)
