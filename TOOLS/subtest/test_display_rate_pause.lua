@@ -2,7 +2,7 @@
 -- rate from a CFR video. This changes the display mode and quits after testing.
 -- Run with --display-rate-match=yes --display-rate-match-delay=3 and this script.
 -- Add --script-opts=display_pause_test-manual_pause=yes to check user pause.
--- Optional display_pause_test-screenshot=PATH saves held/resumed OSD pictures.
+-- Optional display_pause_test-screenshot=PATH saves pre-switch/held/resumed OSD pictures.
 -- For saved-position resume, pass display_pause_test-expected_position=SECONDS
 -- from the watch-later file and reopen without --start.
 local mp = require 'mp'
@@ -10,7 +10,7 @@ local options = require 'mp.options'
 local opts = {manual_pause = false, screenshot = '', expected_position = 0}
 options.read_options(opts, 'display_pause_test')
 
-local started, position, resumed, finished
+local preview, started, position, resumed, finished
 local delay, ticker
 
 local function finish(ok, message)
@@ -24,6 +24,15 @@ end
 
 mp.enable_messages('v')
 mp.register_event('log-message', function(event)
+    if not finished and not preview and
+       event.text:find('notice interval 0.500 seconds.', 1, true) then
+        preview = mp.get_time()
+        if opts.screenshot ~= '' then
+            mp.add_timeout(0.2, function()
+                mp.commandv('screenshot-to-file', opts.screenshot .. '-before-switch.png', 'window')
+            end)
+        end
+    end
     if finished or started or
        not event.text:find('Display refresh changed; holding playback', 1, true) then
         return
@@ -35,6 +44,10 @@ mp.register_event('log-message', function(event)
         return
     end
     started, position = mp.get_time(), pts
+    if not preview or started - preview < 0.45 then
+        finish(false, 'switch did not leave time for the pre-switch notice')
+        return
+    end
     delay = mp.get_property_number('display-rate-match-delay', 0)
     if delay < 1 then
         finish(false, 'this check requires a settling delay of at least 1s')
