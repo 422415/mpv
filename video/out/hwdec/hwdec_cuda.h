@@ -35,6 +35,7 @@ struct cuda_hw_priv {
     CudaFunctions *cu;
     CUcontext display_ctx;
     CUcontext decode_ctx;
+    CUstream interop_stream;
 
     // Do we need to do a full CPU sync after copying
     bool do_full_sync;
@@ -53,6 +54,7 @@ struct cuda_mapper_priv {
     CUarray cu_array[4];
 
     CUcontext display_ctx;
+    CUevent source_ready;
     CUevent copy_done;
     bool copy_pending;
 

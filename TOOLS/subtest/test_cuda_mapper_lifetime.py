@@ -27,6 +27,7 @@ PREAMBLE = r"""
 } } while (0)
 
 typedef void *CUcontext;
+typedef void *CUstream;
 typedef void *CUevent;
 typedef void *CUarray;
 typedef uintptr_t CUdeviceptr;
@@ -41,14 +42,23 @@ enum { CU_MEMORYTYPE_DEVICE, CU_MEMORYTYPE_ARRAY };
 static int refs, waits, stream_waits;
 static bool copy_queued, copy_finished, event_recorded;
 static bool fail_signal, fail_record;
+static bool source_recorded, source_waited;
+static CUstream expected_stream;
 static int push(CUcontext context) { return 0; }
 static int pop(CUcontext *context) { return 0; }
 static int copy_async(const CUDA_MEMCPY2D *copy, void *stream) {
     assert(refs > 0);
+    assert(stream == expected_stream && (!stream || source_waited));
     copy_queued = true;
     return 0;
 }
 static int record(CUevent event, void *stream) {
+    if (event == (CUevent)2) {
+        assert(!stream && !copy_queued);
+        source_recorded = true;
+        return 0;
+    }
+    assert(stream == expected_stream);
     assert(copy_queued);
     if (fail_record) return -1;
     event_recorded = true;
@@ -62,8 +72,15 @@ static int event_sync(CUevent event) {
 }
 static int stream_sync(void *stream) {
     assert(refs > 0);
+    assert(stream == expected_stream);
     stream_waits++;
     copy_finished = true;
+    return 0;
+}
+static int wait_source(CUstream stream, CUevent event, unsigned flags) {
+    assert(stream == expected_stream && stream && event == (CUevent)2);
+    assert(source_recorded && !copy_queued);
+    source_waited = true;
     return 0;
 }
 typedef struct {
@@ -73,11 +90,13 @@ typedef struct {
     int (*cuEventRecord)(CUevent, void *);
     int (*cuEventSynchronize)(CUevent);
     int (*cuStreamSynchronize)(void *);
+    int (*cuStreamWaitEvent)(CUstream, CUevent, unsigned);
 } CudaFunctions;
 struct mp_image { int num_planes; void *planes[4]; unsigned stride[4]; };
 struct ra_hwdec_mapper;
 struct cuda_hw_priv {
     CudaFunctions *cu;
+    CUstream interop_stream;
     bool do_full_sync;
     bool (*ext_wait)(const struct ra_hwdec_mapper *, int);
     bool (*ext_signal)(const struct ra_hwdec_mapper *, int);
@@ -86,6 +105,7 @@ struct cuda_mapper_priv {
     struct mp_image layout;
     CUarray cu_array[4];
     CUcontext display_ctx;
+    CUevent source_ready;
     CUevent copy_done;
     bool copy_pending;
 };
@@ -119,13 +139,17 @@ static void run_case(bool vulkan, bool signal_error, bool event_error) {
     refs = 2; // mapper's reference and the libplacebo frame queue's reference
     waits = stream_waits = 0;
     copy_queued = copy_finished = event_recorded = false;
+    source_recorded = source_waited = false;
+    expected_stream = vulkan ? (CUstream)3 : NULL;
     fail_signal = signal_error;
     fail_record = event_error;
-    CudaFunctions cu = {push, pop, copy_async, record, event_sync, stream_sync};
+    CudaFunctions cu = {push, pop, copy_async, record, event_sync, stream_sync, wait_source};
     struct cuda_hw_priv hw = {.cu = &cu, .do_full_sync = !vulkan,
+                              .interop_stream = expected_stream,
                               .ext_signal = vulkan ? signal_copy : NULL};
     struct owner owner = {&hw};
     struct cuda_mapper_priv priv = {.layout.num_planes = 1,
+                                    .source_ready = vulkan ? (CUevent)2 : NULL,
                                     .copy_done = vulkan ? (CUevent)1 : NULL};
     struct mp_image image = {0};
     struct format format = {1};
