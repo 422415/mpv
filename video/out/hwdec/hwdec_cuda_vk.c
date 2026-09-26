@@ -243,7 +243,7 @@ static bool cuda_ext_vk_wait(const struct ra_hwdec_mapper *mapper, int n)
         }
     };
     ret = CHECK_CU(cu->cuWaitExternalSemaphoresAsync(&evk->cuda_sem,
-                                                     &wp, 1, p_owner->interop_stream));
+                                                     &wp, 1, 0));
     return ret == 0;
 }
 
@@ -264,7 +264,7 @@ static bool cuda_ext_vk_signal(const struct ra_hwdec_mapper *mapper, int n)
         }
     };
     ret = CHECK_CU(cu->cuSignalExternalSemaphoresAsync(&evk->cuda_sem,
-                                                       &sp, 1, p_owner->interop_stream));
+                                                       &sp, 1, 0));
     if (ret != 0)
         return false;
 
@@ -344,12 +344,6 @@ static bool cuda_vk_init(const struct ra_hwdec *hw) {
         return false;
 
     p->decode_ctx = p->display_ctx;
-
-    // Vulkan may wait for a CUDA copy while the next frame is being decoded.
-    // Keep external semaphore waits off the decoder's legacy default stream.
-    ret = CHECK_CU(cu->cuStreamCreate(&p->interop_stream, CU_STREAM_NON_BLOCKING));
-    if (ret < 0)
-        return false;
 
     p->ext_init = cuda_ext_vk_init;
     p->ext_uninit = cuda_ext_vk_uninit;

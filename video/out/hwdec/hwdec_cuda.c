@@ -153,13 +153,6 @@ static void cuda_uninit(struct ra_hwdec *hw)
     hwdec_devices_remove(hw->devs, &p->hwctx);
     av_buffer_unref(&p->hwctx.av_device_ref);
 
-    if (p->interop_stream) {
-        CUcontext dummy;
-        CHECK_CU(cu->cuCtxPushCurrent(p->display_ctx));
-        CHECK_CU(cu->cuStreamDestroy(p->interop_stream));
-        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
-    }
-
     if (p->decode_ctx && p->decode_ctx != p->display_ctx)
         CHECK_CU(cu->cuCtxDestroy(p->decode_ctx));
 
@@ -200,9 +193,6 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         return ret;
 
     if (!p_owner->do_full_sync) {
-        ret = CHECK_CU(cu->cuEventCreate(&p->source_ready, CU_EVENT_DISABLE_TIMING));
-        if (ret < 0)
-            goto error;
         ret = CHECK_CU(cu->cuEventCreate(&p->copy_done,
                         CU_EVENT_BLOCKING_SYNC | CU_EVENT_DISABLE_TIMING));
         if (ret < 0)
@@ -233,8 +223,6 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
 
     // Don't bail if any CUDA calls fail. This is all best effort.
     CHECK_CU(cu->cuCtxPushCurrent(p->display_ctx));
-    if (p->source_ready)
-        CHECK_CU(cu->cuEventDestroy(p->source_ready));
     if (p->copy_done)
         CHECK_CU(cu->cuEventDestroy(p->copy_done));
     for (int n = 0; n < 4; n++) {
@@ -270,22 +258,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     CudaFunctions *cu = p_owner->cu;
     CUcontext dummy;
     int ret = 0, eret = 0;
-    CUstream stream = p_owner->interop_stream;
 
     ret = CHECK_CU(cu->cuCtxPushCurrent(p->display_ctx));
     if (ret < 0)
         return ret;
-
-    if (p->source_ready) {
-        // Honor decode/postprocessing work on the producer's default stream
-        // without putting Vulkan's waits onto that same stream.
-        ret = CHECK_CU(cu->cuEventRecord(p->source_ready, 0));
-        if (ret < 0)
-            goto error;
-        ret = CHECK_CU(cu->cuStreamWaitEvent(stream, p->source_ready, 0));
-        if (ret < 0)
-            goto error;
-    }
 
     for (int n = 0; n < p->layout.num_planes; n++) {
         if (p_owner->ext_wait) {
@@ -307,7 +283,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
             .Height        = mp_image_plane_h(&p->layout, n),
         };
 
-        ret = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, stream));
+        ret = CHECK_CU(cu->cuMemcpy2DAsync(&cpy, 0));
         if (ret < 0)
             goto error;
 
@@ -319,7 +295,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         }
     }
     if (p_owner->do_full_sync)
-        CHECK_CU(cu->cuStreamSynchronize(stream));
+        CHECK_CU(cu->cuStreamSynchronize(0));
 
     // fall through
  error:
@@ -329,11 +305,11 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         // semaphore orders GPU access to the destination, but does not keep
         // the source mp_image alive. Record even after a partial map failure
         // so the unmap callback can safely release any queued copy's source.
-        int event_ret = CHECK_CU(cu->cuEventRecord(p->copy_done, stream));
+        int event_ret = CHECK_CU(cu->cuEventRecord(p->copy_done, 0));
         if (event_ret < 0) {
             // Without a completion event we must finish the submitted work
             // before the failed map releases its source.
-            CHECK_CU(cu->cuStreamSynchronize(stream));
+            CHECK_CU(cu->cuStreamSynchronize(0));
             ret = event_ret;
         } else {
             p->copy_pending = true;
