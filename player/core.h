@@ -31,7 +31,6 @@
 #include "sub/osd.h"
 #include "video/mp_image.h"
 #include "video/out/vo.h"
-#include "video/out/display_rate.h"
 #include "osdep/als.h"
 #include "demux/stheader.h"
 
@@ -178,8 +177,6 @@ struct vo_chain {
     // - video consists of sparse still images
     bool is_sparse;
     bool sparse_eof_signalled;
-
-    bool display_rate_initialized;
 
     bool underrun;
     bool underrun_signaled;
@@ -398,7 +395,7 @@ typedef struct MPContext {
     // The newest frame is at index 0.
     struct frame_info *past_frames;
     int num_past_frames;
-    struct mp_display_cadence display_cadence;
+    bool display_rate_initialized; // one choice per file, also across seeks
 
     double last_idle_tick;
     double next_cache_update;
@@ -481,6 +478,7 @@ typedef struct MPContext {
     char *open_format;
     int open_url_flags;
     bool open_for_prefetch;
+    bool open_probe_display_rate;
     bool demuxer_changed;
     // --- All fields below are owned by open_thread, unless open_done was set
     //     to true.
@@ -537,6 +535,9 @@ void mp_write_watch_later_conf(struct MPContext *mpctx);
 void mp_delete_watch_later_conf(struct MPContext *mpctx, const char *file);
 struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
                                                 struct playlist *playlist);
+
+// display_rate.c
+void mp_probe_display_rates(struct demuxer *demux, int stream_flags);
 
 // loadfile.c
 void mp_abort_playback_async(struct MPContext *mpctx);

@@ -77,6 +77,11 @@ struct sh_stream {
 
     bool missing_timestamps;
 
+    // Experimental display matching: positive only after a complete local-file
+    // packet scan establishes CFR. Zero means mixed or unverified cadence.
+    // Set by the opener before this stream is used by the playback thread.
+    double whole_file_fps;
+
     double seek_preroll;
 
     // stream is a picture (such as album art)

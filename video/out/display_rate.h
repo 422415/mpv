@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <math.h>
+#include <stdlib.h>
 
 struct mp_display_rate {
     double fps;
@@ -11,76 +12,35 @@ struct mp_display_rate {
     bool apply;
 };
 
-struct mp_display_cadence {
-    bool have_pts;
-    bool variable_confirmed; // retained for this file, including across seeks
-    double last_pts, speed;
-    double duration, shortest, longest;
-    int count, confirmations;
-    struct mp_display_rate candidate;
-};
-
-// Reset a measurement window without forgetting that this file is VFR.
-// A new file must explicitly zero the whole state instead.
-static inline void mp_display_cadence_reset(struct mp_display_cadence *c)
+static inline int mp_display_pts_compare(const void *a, const void *b)
 {
-    *c = (struct mp_display_cadence){
-        .variable_confirmed = c->variable_confirmed,
-    };
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
 }
 
-// Sample filter-output timestamps, before presentation drops/repeats. Require
-// two consecutive two-second windows; millisecond container rounding is not VFR.
-static inline bool mp_display_cadence_sample(struct mp_display_cadence *c,
-                                            double pts, double speed,
-                                            struct mp_display_rate *out)
+// A short opening sample cannot distinguish CFR from a locally steady part of
+// VFR. Only a complete packet scan can establish a fixed rate for this playback.
+// Packet order can differ from presentation order (B-frames), so sort first.
+// Return zero for mixed/unknown cadence; millisecond rounding is not variation.
+static inline double mp_display_rate_analyze(double *pts, int count)
 {
-    if (!isfinite(pts) || !isfinite(speed) || speed <= 0) {
-        mp_display_cadence_reset(c);
-        return false;
+    if (count < 12)
+        return 0;
+    for (int i = 0; i < count; i++) {
+        if (!isfinite(pts[i]))
+            return 0;
     }
-    if (!c->have_pts || speed != c->speed || pts < c->last_pts ||
-        pts - c->last_pts > 0.5 * speed)
-    {
-        *c = (struct mp_display_cadence){
-            .have_pts = true, .last_pts = pts, .speed = speed,
-            .variable_confirmed = c->variable_confirmed,
-        };
-        return false;
+    qsort(pts, count, sizeof(*pts), mp_display_pts_compare);
+    double shortest = INFINITY, longest = 0;
+    for (int i = 1; i < count; i++) {
+        double dt = pts[i] - pts[i - 1];
+        if (dt <= 0 || dt > 0.5)
+            return 0;
+        shortest = fmin(shortest, dt);
+        longest = fmax(longest, dt);
     }
-    if (pts == c->last_pts)
-        return false; // core may revisit a frame while waiting for the VO
-    double dt = (pts - c->last_pts) / speed;
-    c->last_pts = pts;
-    if (!c->count || dt < c->shortest)
-        c->shortest = dt;
-    if (dt > c->longest)
-        c->longest = dt;
-    c->duration += dt;
-    c->count++;
-    if (c->duration < 2 || c->count < 12)
-        return false;
-
-    double mean = c->duration / c->count;
-    struct mp_display_rate rate = {
-        .fps = 1 / mean,
-        .variable = c->longest - c->shortest > 0.0015 + mean * 0.01,
-    };
-    bool same = c->confirmations && rate.variable == c->candidate.variable &&
-                (rate.variable || fabs(rate.fps / c->candidate.fps - 1) < 0.0008);
-    c->confirmations = same ? 2 : 1;
-    c->candidate = rate;
-    c->duration = c->shortest = c->longest = 0;
-    c->count = 0;
-    // Genuine VFR often contains long locally fixed-rate stretches. Once two
-    // windows confirm variation, do not let those stretches switch the display
-    // back down and restart the cycle. A single mixed transition window still
-    // cannot latch this, so ordinary CFR section changes remain supported.
-    if (c->confirmations == 2 && rate.variable)
-        c->variable_confirmed = true;
-    rate.variable |= c->variable_confirmed;
-    *out = rate;
-    return c->confirmations == 2;
+    double mean = (pts[count - 1] - pts[0]) / (count - 1);
+    return longest - shortest <= 0.0015 + mean * 0.01 ? 1 / mean : 0;
 }
 
 // Prefer the lowest exact multiple for CFR, then a near multiple (for example,
@@ -88,8 +48,10 @@ static inline bool mp_display_cadence_sample(struct mp_display_cadence *c,
 // always win. Otherwise use the highest available progressive mode.
 static inline double mp_display_rate_score(struct mp_display_rate rate, double hz)
 {
-    if (!(hz > 1) || !(rate.fps > 0))
+    if (!(hz > 1) || (!rate.variable && !(rate.fps > 0)))
         return -1;
+    if (rate.variable)
+        return hz;
     double multiple = round(hz / rate.fps);
     if (!rate.variable && multiple >= 1) {
         double error = fabs(hz / (rate.fps * multiple) - 1);

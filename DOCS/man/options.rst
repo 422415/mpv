@@ -1315,39 +1315,35 @@ Video
 
 ``--display-rate-match=<no|yes|test>`` (Windows only)
     Experimental automatic physical display refresh matching (default: ``no``).
-    Uses the reported video frame rate, adjusted for playback speed, for an
-    initial choice before playback starts. This choice is provisional: live
-    filter-output timestamps can correct it for VFR or filters that change the
-    cadence. If no initial rate is available, only live detection is used.
-    Live detection uses two-second windows; two agreeing windows are required
-    before acting, so brief changes are ignored. Seeks restart live detection.
+    Selects one refresh rate before playback and keeps it for the whole file,
+    including across seeks, locally steady sections and playback speed changes.
+    For local Matroska/libavformat files, scans video packet timestamps without
+    decoding before playback. A complete scan can establish CFR; a short steady
+    opening cannot establish that the rest of a file is CFR. The scan stops
+    between packets after five seconds or one million packets. Network inputs
+    are not scanned. Mixed cadence, unavailable timestamps and incomplete scans
+    use the highest supported refresh rate for the whole playback.
     This does not change video timestamps, interpolate frames, or alter
     ``--video-sync``.
 
-    Stable sections select the lowest supported progressive refresh rate that
-    is an exact multiple of their cadence. If none exists, a near multiple
+    Confirmed CFR files select the lowest supported progressive refresh rate
+    that is an exact multiple of their cadence, adjusted for initial playback
+    speed and a filter's declared cadence multiplier. If none exists, a near multiple
     (within 0.2%) is preferred, for example 24 Hz for 23.976 fps when fractional
     modes are unavailable. Exact multiples always take priority over near ones.
     A near match retains a small timing difference; this option does not enable
-    playback speed correction. Variable sections, and fixed rates without an
+    playback speed correction. Variable files, and fixed rates without an
     exact or near match, select the highest supported progressive rate at the
     current resolution, orientation and desktop bit depth. This accommodates
     mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
     timings fit a fixed refresh grid perfectly.
-
-    Once two windows confirm variable cadence, keep the VFR policy for the
-    rest of this file's playback, including across pauses, seeks and speed
-    changes. Locally steady passages in a VFR file must not repeatedly switch
-    the display back down. A new file playback starts fresh. A single mixed
-    window at a fixed-rate section boundary does not establish VFR, so clean
-    transitions between fixed rates can still select their matching modes.
 
     Only the display containing the player is changed. Audio/video pause before
     Windows applies a switch, then stay paused for ``--display-rate-match-delay``
     seconds after it succeeds, before resuming automatically. During this wait,
     a notice appears at the top of the picture (unless OSD is disabled). The
     first frame can be displayed while startup is held. A manual pause
-    during this wait is preserved. Changes are at least five seconds apart. No switching
+    during this wait is preserved. No switching
     occurs while minimized, paused, playing backward, or encoding. The matched
     refresh is retained across consecutive playlist entries and file loops, so
     episodes with matching cadence do not switch back to the desktop rate in

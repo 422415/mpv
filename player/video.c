@@ -41,6 +41,7 @@
 #include "filters/f_decoder_wrapper.h"
 #include "filters/f_enhancement_pair.h"
 #include "video/out/vo.h"
+#include "video/out/display_rate.h"
 
 #include "core.h"
 #include "command.h"
@@ -115,7 +116,6 @@ void reset_video_state(struct MPContext *mpctx)
     mpctx->video_pts = MP_NOPTS_VALUE;
     mpctx->last_frame_duration = 0;
     mpctx->num_past_frames = 0;
-    mp_display_cadence_reset(&mpctx->display_cadence);
     mpctx->total_avsync_change = 0;
     mpctx->last_av_difference = 0;
     mpctx->mistimed_frames_total = 0;
@@ -1223,33 +1223,26 @@ void write_video(struct MPContext *mpctx)
         mp_mutex_unlock(&vo->params_mutex);
     }
 
-    // Match the reported rate before playback starts. Live output timestamps
-    // can subsequently correct this provisional choice for VFR or filters that
-    // change the cadence, without playing several seconds at the desktop rate.
+    // Select once for the whole file. Neither a seek nor a locally fixed-rate
+    // stretch in VFR may trigger a display change during playback.
     if (vo->opts->display_rate_match && !mpctx->paused && !vo_c->is_sparse &&
+        !mpctx->display_rate_initialized &&
         mpctx->play_dir > 0 && !opts->untimed && !mpctx->encode_lavc_ctx &&
         mpctx->next_frames[0]->pts != MP_NOPTS_VALUE)
     {
-        struct mp_display_rate rate = {0};
-        bool have_rate = false;
-        if (!vo_c->display_rate_initialized) {
-            vo_c->display_rate_initialized = true;
-            rate.fps = vo_c->filter->container_fps * opts->playback_speed;
-            rate.variable = mpctx->display_cadence.variable_confirmed;
-            have_rate = isfinite(rate.fps) && rate.fps > 0;
-            if (have_rate)
-                MP_VERBOSE(mpctx, "Initial display refresh selection: %.3f fps.\n",
-                           rate.fps);
+        mpctx->display_rate_initialized = true;
+        struct sh_stream *sh = track ? track->stream : NULL;
+        struct mp_display_rate rate = {.variable = true};
+        if (sh && sh->whole_file_fps > 0) {
+            rate.fps = sh->whole_file_fps * opts->playback_speed;
+            // Preserve a filter's declared cadence multiplier, e.g. RIFE.
+            if (sh->codec->fps > 0 && vo_c->filter->container_fps > 0)
+                rate.fps *= vo_c->filter->container_fps / sh->codec->fps;
+            rate.variable = !isfinite(rate.fps) || rate.fps <= 0;
         }
-        // Observe each unique filter-output PTS, including frames the VO may
-        // later drop. Wall-clock sampling would mistake slow rendering for
-        // low-rate video. Unknown initial FPS uses this existing detector.
-        if (!have_rate)
-            have_rate = mp_display_cadence_sample(&mpctx->display_cadence,
-                                                 mpctx->next_frames[0]->pts,
-                                                 opts->playback_speed, &rate);
-        if (have_rate &&
-            vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
+        MP_VERBOSE(mpctx, "Whole-file display refresh selection: %s, %.3f fps.\n",
+                   rate.variable ? "mixed/unknown" : "CFR", rate.fps);
+        if (vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
         {
             // Hold both clocks without changing the user's pause setting.
             // A nonzero timestamp holds playback even during the blocking
@@ -1275,8 +1268,6 @@ void write_video(struct MPContext *mpctx)
             if (mpctx->video_status >= STATUS_READY)
                 return;
         }
-    } else {
-        mp_display_cadence_reset(&mpctx->display_cadence);
     }
 
     mpctx->time_frame -= get_relative_time(mpctx);

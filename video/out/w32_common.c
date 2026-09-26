@@ -111,7 +111,6 @@ struct vo_w32_state {
     wchar_t rate_device[CCHDEVICENAME];
     DEVMODEW rate_original, rate_applied;
     bool rate_owned, rate_blocked;
-    ULONGLONG rate_last_switch;
     DWORD rate_test_hz;
     bool rate_test_variable;
     char *color_profile; // Path of the current screen's color profile
@@ -736,7 +735,6 @@ static bool same_display_mode(const DEVMODEW *a, const DEVMODEW *b)
 static void restore_display_rate(struct vo_w32_state *w32)
 {
     w32->rate_blocked = false;
-    w32->rate_last_switch = 0;
     w32->rate_test_hz = 0;
     if (!w32->rate_owned)
         return;
@@ -820,8 +818,7 @@ static int match_display_rate(struct vo_w32_state *w32, struct mp_display_rate *
         }
         return VO_FALSE;
     }
-    if (same_display_mode(&best, &current) ||
-        (w32->rate_last_switch && GetTickCount64() - w32->rate_last_switch < 5000))
+    if (same_display_mode(&best, &current))
         return VO_FALSE;
     if (!rate->apply)
         return VO_TRUE; // core pauses the audio/video clocks before applying
@@ -840,7 +837,6 @@ static int match_display_rate(struct vo_w32_state *w32, struct mp_display_rate *
     }
     w32->rate_applied = best;
     w32->rate_owned = true;
-    w32->rate_last_switch = GetTickCount64();
     MP_INFO(w32, "Matched %s %.3f fps to %.3f Hz.\n",
             rate->variable ? "VFR" : "CFR", rate->fps,
             mp_display_rate_from_gdi(best.dmDisplayFrequency));
