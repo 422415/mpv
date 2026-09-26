@@ -1335,6 +1335,13 @@ Video
     mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
     timings fit a fixed refresh grid perfectly.
 
+    Once two windows confirm variable cadence, keep the VFR policy for the
+    rest of this file's playback, including across pauses, seeks and speed
+    changes. Locally steady passages in a VFR file must not repeatedly switch
+    the display back down. A new file playback starts fresh. A single mixed
+    window at a fixed-rate section boundary does not establish VFR, so clean
+    transitions between fixed rates can still select their matching modes.
+
     Only the display containing the player is changed. Audio/video pause before
     Windows applies a switch, then stay paused for ``--display-rate-match-delay``
     seconds after it succeeds, before resuming automatically. During this wait,

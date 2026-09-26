@@ -13,11 +13,21 @@ struct mp_display_rate {
 
 struct mp_display_cadence {
     bool have_pts;
+    bool variable_confirmed; // retained for this file, including across seeks
     double last_pts, speed;
     double duration, shortest, longest;
     int count, confirmations;
     struct mp_display_rate candidate;
 };
+
+// Reset a measurement window without forgetting that this file is VFR.
+// A new file must explicitly zero the whole state instead.
+static inline void mp_display_cadence_reset(struct mp_display_cadence *c)
+{
+    *c = (struct mp_display_cadence){
+        .variable_confirmed = c->variable_confirmed,
+    };
+}
 
 // Sample filter-output timestamps, before presentation drops/repeats. Require
 // two consecutive two-second windows; millisecond container rounding is not VFR.
@@ -26,7 +36,7 @@ static inline bool mp_display_cadence_sample(struct mp_display_cadence *c,
                                             struct mp_display_rate *out)
 {
     if (!isfinite(pts) || !isfinite(speed) || speed <= 0) {
-        *c = (struct mp_display_cadence){0};
+        mp_display_cadence_reset(c);
         return false;
     }
     if (!c->have_pts || speed != c->speed || pts < c->last_pts ||
@@ -34,6 +44,7 @@ static inline bool mp_display_cadence_sample(struct mp_display_cadence *c,
     {
         *c = (struct mp_display_cadence){
             .have_pts = true, .last_pts = pts, .speed = speed,
+            .variable_confirmed = c->variable_confirmed,
         };
         return false;
     }
@@ -61,6 +72,13 @@ static inline bool mp_display_cadence_sample(struct mp_display_cadence *c,
     c->candidate = rate;
     c->duration = c->shortest = c->longest = 0;
     c->count = 0;
+    // Genuine VFR often contains long locally fixed-rate stretches. Once two
+    // windows confirm variation, do not let those stretches switch the display
+    // back down and restart the cycle. A single mixed transition window still
+    // cannot latch this, so ordinary CFR section changes remain supported.
+    if (c->confirmations == 2 && rate.variable)
+        c->variable_confirmed = true;
+    rate.variable |= c->variable_confirmed;
     *out = rate;
     return c->confirmations == 2;
 }

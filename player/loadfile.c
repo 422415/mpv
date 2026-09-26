@@ -1811,6 +1811,7 @@ static void play_current_file(struct MPContext *mpctx)
     mpctx->filename = NULL;
     mpctx->shown_aframes = 0;
     mpctx->shown_vframes = 0;
+    mpctx->display_cadence = (struct mp_display_cadence){0};
     mpctx->last_chapter_seek = -2;
     mpctx->last_chapter_flag = false;
     mpctx->last_chapter = -2;

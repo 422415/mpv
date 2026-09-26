@@ -115,7 +115,7 @@ void reset_video_state(struct MPContext *mpctx)
     mpctx->video_pts = MP_NOPTS_VALUE;
     mpctx->last_frame_duration = 0;
     mpctx->num_past_frames = 0;
-    mpctx->display_cadence = (struct mp_display_cadence){0};
+    mp_display_cadence_reset(&mpctx->display_cadence);
     mpctx->total_avsync_change = 0;
     mpctx->last_av_difference = 0;
     mpctx->mistimed_frames_total = 0;
@@ -1235,6 +1235,7 @@ void write_video(struct MPContext *mpctx)
         if (!vo_c->display_rate_initialized) {
             vo_c->display_rate_initialized = true;
             rate.fps = vo_c->filter->container_fps * opts->playback_speed;
+            rate.variable = mpctx->display_cadence.variable_confirmed;
             have_rate = isfinite(rate.fps) && rate.fps > 0;
             if (have_rate)
                 MP_VERBOSE(mpctx, "Initial display refresh selection: %.3f fps.\n",
@@ -1275,7 +1276,7 @@ void write_video(struct MPContext *mpctx)
                 return;
         }
     } else {
-        mpctx->display_cadence = (struct mp_display_cadence){0};
+        mp_display_cadence_reset(&mpctx->display_cadence);
     }
 
     mpctx->time_frame -= get_relative_time(mpctx);

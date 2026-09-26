@@ -53,6 +53,22 @@ int main(void)
     assert(choose(rate, tv, 8) == 60);
     assert(choose(rate, integer_modes, 10) == 144);
     assert(fabs(choose(rate, limited, 2) - 60000.0/1001) < 0.001);
+    // Confirmed VFR must survive locally fixed stretches, a seek and a window
+    // reset. Otherwise this repeats 144 -> 24/30 -> 144 throughout an episode.
+    assert(c.variable_confirmed);
+    rate = feed(&c, &pts, 24000.0/1001, 24000.0/1001, 720, true);
+    assert(rate.variable && choose(rate, integer_modes, 10) == 144);
+    mp_display_cadence_reset(&c);
+    pts = 0;
+    rate = feed(&c, &pts, 30000.0/1001, 30000.0/1001, 300, true);
+    assert(rate.variable && choose(rate, integer_modes, 10) == 144);
+    assert(!mp_display_cadence_sample(&c, 1, 2, &rate));
+    assert(c.variable_confirmed);
+
+    // New file: clear VFR history. Clean CFR section changes still work and
+    // must not latch VFR merely because one window straddles the boundary.
+    c = (struct mp_display_cadence){0};
+    pts = 0;
     rate = feed(&c, &pts, 30000.0/1001, 30000.0/1001, 300, true);
     assert(!rate.variable);
     assert(choose(rate, integer_modes, 10) == 30);
@@ -60,6 +76,7 @@ int main(void)
     assert(fabs(choose(rate, limited, 2) - 60000.0/1001) < 0.001);
     rate = feed(&c, &pts, 24000.0/1001, 24000.0/1001, 240, true);
     assert(!rate.variable);
+    assert(!c.variable_confirmed);
     assert(fabs(choose(rate, tv, 8) - 24000.0/1001) < 0.001);
 
     // Repeated core visits do not create zero-duration frames. A seek clears
@@ -75,6 +92,6 @@ int main(void)
     const struct mp_display_rate pal = {.fps = 25};
     const unsigned ntsc_only[] = {23, 24, 59, 60};
     assert(choose(pal, ntsc_only, 4) == 60);
-    puts("PASS CFR/VFR; integer-only and limited TV modes; exact-match priority; seek/speed reset");
+    puts("PASS CFR/VFR; modes; exact-match priority; persistent VFR across fixed stretches/seeks; new-file reset; clean CFR transitions");
     return 0;
 }
