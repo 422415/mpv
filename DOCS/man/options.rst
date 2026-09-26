@@ -1338,10 +1338,12 @@ Video
     mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
     timings fit a fixed refresh grid perfectly.
 
-    Only the display containing the player is changed. Audio/video pause before
-    Windows applies a switch, then stay paused for ``--display-rate-match-delay``
-    seconds after it succeeds, before resuming automatically. During this wait,
-    a notice appears at the top of the picture (unless OSD is disabled). The
+    Only the display containing the player is changed. Audio/video pause and a
+    notice appears at the top of the picture, with a half-second interval for it
+    to render before Windows applies the switch. This notice interval is skipped
+    if OSD is disabled. Audio/video then stay paused for
+    ``--display-rate-match-delay`` seconds after the switch succeeds, before
+    resuming automatically. The notice remains throughout both intervals. The
     first frame can be displayed while startup is held. A manual pause
     during this wait is preserved. No switching
     occurs while minimized, paused, playing backward, or encoding. The matched

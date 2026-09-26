@@ -436,7 +436,8 @@ typedef struct MPContext {
     int remaining_ab_loops;
 
     bool paused_for_cache;
-    double display_rate_resume_time; // nonzero while refresh switching/settling
+    double display_rate_resume_time; // deadline for notice or settling hold
+    struct mp_display_rate *display_rate_pending; // apply after the notice
     bool demux_underrun;
     double cache_stop_time;
     int cache_buffer;

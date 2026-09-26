@@ -48,6 +48,7 @@
 #include "stream/stream.h"
 #include "sub/dec_sub.h"
 #include "sub/osd.h"
+#include "video/out/display_rate.h"
 #include "video/out/vo.h"
 
 // Wait until mp_wakeup_core() is called, since the last time
@@ -209,18 +210,43 @@ static void handle_display_rate_pause(struct MPContext *mpctx)
     if (!mpctx->display_rate_resume_time)
         return;
 
+    bool cancel = !mpctx->opts->vo->display_rate_match ||
+                  !mpctx->video_out || !mpctx->vo_chain || mpctx->stop_play;
     double remaining = mpctx->display_rate_resume_time - mp_time_sec();
-    if (remaining <= 0 || !mpctx->opts->vo->display_rate_match) {
-        mpctx->display_rate_resume_time = 0;
-        mpctx->osd_force_update = true;
-        MP_VERBOSE(mpctx, "Display refresh settling pause finished.\n");
-        // A user pause or cache pause still applies after our hold is released.
-        update_internal_pause_state(mpctx);
-    } else {
+    if (remaining > 0 && !cancel) {
         // Keep processing commands, window events, and cache updates while
-        // waiting. Never block the playback thread with a settling sleep.
+        // the notice or settling timer runs.
         mp_set_timeout(mpctx, remaining);
+        return;
     }
+
+    if (mpctx->display_rate_pending) {
+        struct mp_display_rate rate = *mpctx->display_rate_pending;
+        talloc_free(mpctx->display_rate_pending);
+        mpctx->display_rate_pending = NULL;
+        if (cancel) {
+            mpctx->display_rate_initialized = false;
+        } else {
+            int result = vo_control(mpctx->video_out, VOCTRL_MATCH_DISPLAY_RATE,
+                                    &rate);
+            double delay = mpctx->opts->vo->display_rate_match_delay;
+            if (result == VO_TRUE && delay > 0) {
+                // The settling interval starts after Windows returns, not
+                // when the notice first appeared.
+                mpctx->display_rate_resume_time = mp_time_sec() + delay;
+                MP_VERBOSE(mpctx, "Display refresh changed; holding playback for %.3f seconds.\n",
+                           delay);
+                mp_set_timeout(mpctx, delay);
+                return;
+            }
+        }
+    }
+
+    mpctx->display_rate_resume_time = 0;
+    mpctx->osd_force_update = true;
+    MP_VERBOSE(mpctx, "Display refresh settling pause finished.\n");
+    // A user pause or cache pause still applies after our hold is released.
+    update_internal_pause_state(mpctx);
 }
 
 void update_screensaver_state(struct MPContext *mpctx)

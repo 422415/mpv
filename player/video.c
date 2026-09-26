@@ -172,6 +172,11 @@ void uninit_video_chain(struct MPContext *mpctx)
 
         mp_notify(mpctx, MPV_EVENT_VIDEO_RECONFIG, NULL);
     }
+    if (mpctx->display_rate_pending) {
+        talloc_free(mpctx->display_rate_pending);
+        mpctx->display_rate_pending = NULL;
+        mpctx->display_rate_initialized = false;
+    }
     if (mpctx->display_rate_resume_time) {
         mpctx->display_rate_resume_time = 0;
         mpctx->osd_force_update = true;
@@ -1244,24 +1249,18 @@ void write_video(struct MPContext *mpctx)
                    rate.variable ? "mixed/unknown" : "CFR", rate.fps);
         if (vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
         {
-            // Hold both clocks without changing the user's pause setting.
-            // A nonzero timestamp holds playback even during the blocking
-            // Windows call; the actual settling deadline starts on success.
-            mpctx->display_rate_resume_time = mp_time_sec();
-            update_internal_pause_state(mpctx);
-            MP_VERBOSE(mpctx, "Pausing playback for display refresh change.\n");
+            // Let the OSD render before the blocking Windows mode change.
+            // The playloop applies this request after the notice interval;
+            // both clocks remain held without changing the user's pause.
             rate.apply = true;
-            int result = vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate);
-            double delay = vo->opts->display_rate_match_delay;
-            if (result == VO_TRUE && delay > 0) {
-                mpctx->display_rate_resume_time = mp_time_sec() + delay;
-                MP_VERBOSE(mpctx, "Display refresh changed; holding playback for %.3f seconds.\n",
-                           delay);
-                mp_set_timeout(mpctx, delay);
-            } else {
-                mpctx->display_rate_resume_time = 0;
-                update_internal_pause_state(mpctx);
-            }
+            mpctx->display_rate_pending = talloc_memdup(mpctx, &rate, sizeof(rate));
+            double preview = opts->video_osd && opts->osd_level >= 1 ? 0.5 : 0;
+            mpctx->display_rate_resume_time = mp_time_sec() + preview;
+            update_internal_pause_state(mpctx);
+            update_osd_msg(mpctx);
+            MP_VERBOSE(mpctx, "Pausing playback for display refresh change; "
+                       "notice interval %.3f seconds.\n", preview);
+            mp_set_timeout(mpctx, preview);
             // Queue the first still frame so the matching message is visible
             // while startup is held. Both clocks remain paused until the timer
             // expires; an already-playing video keeps its current frame.
