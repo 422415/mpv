@@ -7151,9 +7151,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         frame->approx_duration / frame->ideal_frame_vsync_duration : 0;
     camera = p->next_opts->camera_cadence && !opts->blend_subs &&
              ratio > 1.01 && ratio < 32 && fabs(ratio - round(ratio)) > 0.01;
-    params.camera_cadence = camera && frame->display_synced &&
-                           !frame->still && frame->num_frames > 1 && !p->paused;
-    camera = params.camera_cadence;
+    camera &= frame->display_synced && !frame->still &&
+              frame->num_frames > 1 && !p->paused;
+    pl_renderer_set_camera_cadence(p->rr, false, 0);
     if (!camera)
         p->camera_clock_valid = false;
 #endif
@@ -7505,7 +7505,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // Update queue state
         struct pl_queue_params qparams = *pl_queue_params(
             .pts = frame->current->pts + pts_offset,
-            .radius = pl_frame_mix_radius(&params),
+            .radius = camera ? 2.0 : pl_frame_mix_radius(&params),
             .vsync_duration = can_interpolate ? frame->ideal_frame_vsync_duration : 0,
             .interpolation_threshold = opts->interpolation_threshold,
             .drift_compensation = 0,
@@ -7531,7 +7531,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             }
             int64_t tick = llround((qparams.pts - p->camera_origin) /
                                   frame->ideal_frame_vsync_duration);
-            params.camera_cadence_offset = mp_camera_cadence_offset(tick, 1.0 / ratio);
+            pl_renderer_set_camera_cadence(p->rr, true,
+                mp_camera_cadence_offset(tick, 1.0 / ratio));
         }
 #endif
 
