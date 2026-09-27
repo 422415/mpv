@@ -384,8 +384,7 @@ struct priv {
     bool osd_overlays_exhausted; // logged once if MAX_OSD_OVERLAYS is hit
     pl_fmt osd_inter_fmt; // RGBA target for the capped-res overlay composite (NULL = disabled)
     pl_queue queue;
-    double camera_origin;
-    bool camera_clock_valid;
+    struct mp_camera_cadence_clock camera_clock;
     pl_swapchain sw;
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
     pl_tex *sub_tex;
@@ -7147,15 +7146,14 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     bool cache_frame = will_redraw || frame->still || p->paused;
     bool camera = false;
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
-    double ratio = frame->ideal_frame_vsync_duration > 0 ?
-        frame->approx_duration / frame->ideal_frame_vsync_duration : 0;
     camera = p->next_opts->camera_cadence && !opts->blend_subs &&
-             ratio > 1.01 && ratio < 32 && fabs(ratio - round(ratio)) > 0.01;
+             mp_camera_cadence_needed(frame->approx_duration,
+                                      frame->ideal_frame_vsync_duration);
     camera &= frame->display_synced && !frame->still &&
               frame->num_frames > 1 && !p->paused;
     pl_renderer_set_camera_cadence(p->rr, false, 0);
     if (!camera)
-        p->camera_clock_valid = false;
+        p->camera_clock.valid = false;
 #endif
     bool can_interpolate = (opts->interpolation || camera) && frame->display_synced &&
                            !frame->still && frame->num_frames > 1 && !p->paused;
@@ -7201,7 +7199,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         int id = frame->frame_id + n;
 
         if (p->want_reset) {
-            p->camera_clock_valid = false;
+            p->camera_clock.valid = false;
             pl_queue_reset(p->queue);
             p->last_pts = 0.0;
             p->last_id = 0;
@@ -7525,14 +7523,10 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         p->last_pts = qparams.pts;
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
         if (camera) {
-            if (!p->camera_clock_valid) {
-                p->camera_origin = qparams.pts;
-                p->camera_clock_valid = true;
-            }
-            int64_t tick = llround((qparams.pts - p->camera_origin) /
-                                  frame->ideal_frame_vsync_duration);
             pl_renderer_set_camera_cadence(p->rr, true,
-                mp_camera_cadence_offset(tick, 1.0 / ratio));
+                mp_camera_cadence_sample(&p->camera_clock, qparams.pts,
+                                        frame->approx_duration,
+                                        frame->ideal_frame_vsync_duration));
         }
 #endif
 
