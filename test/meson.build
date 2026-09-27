@@ -73,6 +73,10 @@ img_utils = static_library('img-utils', 'img_utils.c', include_directories: incd
                            dependencies: [libavcodec, libplacebo], objects: img_utils_objects)
 
 # The actual tests.
+camera_cadence = executable('camera-cadence', 'camera_cadence.c',
+                            include_directories: incdir, dependencies: libm)
+test('camera-cadence', camera_cadence)
+
 display_rate = executable('display-rate', 'display_rate.c',
                           include_directories: incdir, dependencies: libm)
 test('display-rate', display_rate)

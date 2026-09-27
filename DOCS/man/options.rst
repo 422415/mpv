@@ -6446,6 +6446,22 @@ them.
     Enabling this at runtime may require setting ``--hwdec-extra-frames``, as
     the hardware decoder's surface pool is sized at decoder initialization.
 
+``--camera-cadence=<yes|no>``
+    Experimental AJN camera-pan presentation (default: no). Requires the AJN
+    patched libplacebo, ``--vo=gpu-next``, ``--video-sync=display-resample`` and
+    ``--blend-subtitles=no``. Use ``--gpu-api=vulkan`` and a GPU hardware decoder
+    for the tested path. Start with 23.976 fps content on a fixed 60 Hz display.
+
+    Tracks rigid camera translation entirely on the GPU and shifts the selected
+    original drawing at display cadence. It reuses processed frame textures;
+    AI upscaling still runs at source rate. Target subtitles and OSD are drawn
+    after the shift. Uncertain motion retains the original drawing.
+
+    This is a perceptual experiment, not lossless output or general frame
+    interpolation. Near-integer display/source ratios, paused playback and
+    source-blended subtitles bypass it. It does not change the display mode.
+    Keep ``--interpolation=no`` to compare it with ordinary presentation.
+
 ``--interpolation-threshold=<0..1,-1>``
     Threshold below which frame ratio interpolation gets disabled (default:
     ``0.01``). This is calculated as ``abs(disphz/vfps - 1) < threshold``,

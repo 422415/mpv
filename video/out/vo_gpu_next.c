@@ -51,6 +51,7 @@
 #include "gpu/video_shaders.h"
 #include "sub/osd.h"
 #include "gpu_next/context.h"
+#include "gpu_next/camera_cadence.h"
 
 #if HAVE_GL && defined(PL_HAVE_OPENGL)
 #include <libplacebo/opengl.h>
@@ -383,6 +384,8 @@ struct priv {
     bool osd_overlays_exhausted; // logged once if MAX_OSD_OVERLAYS is hit
     pl_fmt osd_inter_fmt; // RGBA target for the capped-res overlay composite (NULL = disabled)
     pl_queue queue;
+    double camera_origin;
+    bool camera_clock_valid;
     pl_swapchain sw;
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
     pl_tex *sub_tex;
@@ -840,6 +843,7 @@ struct gl_next_opts {
     float background_blur_radius;
     float corner_rounding;
     bool inter_preserve;
+    bool camera_cadence;
     struct user_lut lut;
     struct user_lut image_lut;
     struct user_lut target_lut;
@@ -879,6 +883,9 @@ const struct m_sub_options gl_next_conf = {
         {"background-blur-radius", OPT_FLOAT(background_blur_radius)},
         {"corner-rounding", OPT_FLOAT(corner_rounding), M_RANGE(0, 1)},
         {"interpolation-preserve", OPT_BOOL(inter_preserve)},
+#ifdef PL_HAVE_AJN_CAMERA_CADENCE
+        {"camera-cadence", OPT_BOOL(camera_cadence)},
+#endif
         {"lut", OPT_STRING(lut.opt), .flags = M_OPT_FILE},
         {"lut-type", OPT_CHOICE_C(lut.type, lut_types)},
         {"image-lut", OPT_STRING(image_lut.opt), .flags = M_OPT_FILE},
@@ -7138,7 +7145,19 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     const struct gl_video_opts *opts = p->opts_cache->opts;
     bool will_redraw = frame->display_synced && frame->num_vsyncs > 1;
     bool cache_frame = will_redraw || frame->still || p->paused;
-    bool can_interpolate = opts->interpolation && frame->display_synced &&
+    bool camera = false;
+#ifdef PL_HAVE_AJN_CAMERA_CADENCE
+    double ratio = frame->ideal_frame_vsync_duration > 0 ?
+        frame->approx_duration / frame->ideal_frame_vsync_duration : 0;
+    camera = p->next_opts->camera_cadence && !opts->blend_subs &&
+             ratio > 1.01 && ratio < 32 && fabs(ratio - round(ratio)) > 0.01;
+    params.camera_cadence = camera && frame->display_synced &&
+                           !frame->still && frame->num_frames > 1 && !p->paused;
+    camera = params.camera_cadence;
+    if (!camera)
+        p->camera_clock_valid = false;
+#endif
+    bool can_interpolate = (opts->interpolation || camera) && frame->display_synced &&
                            !frame->still && frame->num_frames > 1 && !p->paused;
     double pts_offset = can_interpolate ? frame->ideal_frame_vsync : 0;
     params.info_callback = info_callback;
@@ -7182,6 +7201,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         int id = frame->frame_id + n;
 
         if (p->want_reset) {
+            p->camera_clock_valid = false;
             pl_queue_reset(p->queue);
             p->last_pts = 0.0;
             p->last_id = 0;
@@ -7503,6 +7523,17 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             qparams.pts = first.pts;
         }
         p->last_pts = qparams.pts;
+#ifdef PL_HAVE_AJN_CAMERA_CADENCE
+        if (camera) {
+            if (!p->camera_clock_valid) {
+                p->camera_origin = qparams.pts;
+                p->camera_clock_valid = true;
+            }
+            int64_t tick = llround((qparams.pts - p->camera_origin) /
+                                  frame->ideal_frame_vsync_duration);
+            params.camera_cadence_offset = mp_camera_cadence_offset(tick, 1.0 / ratio);
+        }
+#endif
 
         switch (pl_queue_update(p->queue, &mix, &qparams)) {
         case PL_QUEUE_ERR:
@@ -9078,6 +9109,10 @@ static void update_render_options(struct vo *vo)
         req_frames += ceilf(pars->params.frame_mixer->kernel->radius) *
                       (pars->params.skip_anti_aliasing ? 1 : 2);
     }
+#ifdef PL_HAVE_AJN_CAMERA_CADENCE
+    if (p->next_opts->camera_cadence && !opts->blend_subs)
+        req_frames = MPMAX(req_frames, 4);
+#endif
     req_frames = MPMIN(VO_MAX_REQ_FRAMES, req_frames);
     // pl_queue also retains past frames for the symmetric mixing window,
     vo_set_queue_params(vo, 0, req_frames, 2 * req_frames - 1);
