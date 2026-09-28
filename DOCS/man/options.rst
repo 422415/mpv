@@ -6460,6 +6460,12 @@ them.
     left unchanged. This is a conservative translation experiment, not
     general animation interpolation or a guarantee of artifact-free output.
 
+    Looks ahead by three source frames to confirm pan starts. An isolated
+    one-frame camera pause between similar translations is smoothed across
+    the adjacent intervals; longer camera stops are preserved. This changes
+    camera positions, while retaining original drawing timing. The wider
+    working window uses two additional processed-frame textures.
+
     Takes precedence over ``--camera-cadence``. Bypasses pauses, unmatched
     refresh rates, and subtitles blended into source frames. It does not
     switch the display refresh rate automatically.

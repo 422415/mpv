@@ -7517,7 +7517,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // Update queue state
         struct pl_queue_params qparams = *pl_queue_params(
             .pts = frame->current->pts + pts_offset,
-            .radius = camera ? 2.0 : pl_frame_mix_radius(&params),
+            .radius = camera_pan ? 3.0 : camera ? 2.0 : pl_frame_mix_radius(&params),
             .vsync_duration = can_interpolate ? frame->ideal_frame_vsync_duration : 0,
             .interpolation_threshold = opts->interpolation_threshold,
             .drift_compensation = 0,
@@ -9125,7 +9125,7 @@ static void update_render_options(struct vo *vo)
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
     if ((p->next_opts->camera_cadence || p->next_opts->camera_pan_smoothing) &&
         !opts->blend_subs)
-        req_frames = MPMAX(req_frames, 4);
+        req_frames = MPMAX(req_frames, p->next_opts->camera_pan_smoothing ? 5 : 4);
 #endif
     req_frames = MPMIN(VO_MAX_REQ_FRAMES, req_frames);
     // pl_queue also retains past frames for the symmetric mixing window,
