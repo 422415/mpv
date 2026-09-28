@@ -21,6 +21,15 @@ static void check_rate(double source, double display, bool needed)
 
 int main(void)
 {
+    // Pan smoothing targets exact source/display multiples, including the
+    // fractional source rate used with a nominal 72 Hz desktop mode.
+    assert(mp_camera_pan_smoothing_needed(1001.0 / 24000, 1.0 / 72));
+    assert(mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 48));
+    assert(mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 120));
+    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 60));
+    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 24));
+    assert(!mp_camera_pan_smoothing_needed(0, 1.0 / 72));
+
     // At 24->60, each emulated camera position is held for two refreshes.
     const double camera[] = {0, 0, 0.6, 0.6, 1.6, 1.6, 2.2, 2.2};
     for (int i = 0; i < 8; i++)

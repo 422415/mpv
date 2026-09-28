@@ -6446,6 +6446,24 @@ them.
     Enabling this at runtime may require setting ``--hwdec-extra-frames``, as
     the hardware decoder's surface pool is sized at decoder initialization.
 
+``--camera-pan-smoothing=<yes|no>``
+    Experimental AJN rigid-pan smoothing (default: no). Requires the matching
+    AJN libplacebo, ``--vo=gpu-next``, ``--video-sync=display-resample`` and
+    ``--blend-subtitles=no``. Use Vulkan and GPU hardware decoding. Select a
+    display refresh rate close to an integer multiple of the source rate,
+    at least 2x (for example, 23.976 fps at nominal 72 Hz).
+
+    Samples a coherent camera translation at every display refresh while
+    keeping the original drawing changes on their source timeline. It does
+    not blend drawings. Motion and image processing stay on the GPU. The
+    whole source image moves rigidly; shots with inconsistent motion are
+    left unchanged. This is a conservative translation experiment, not
+    general animation interpolation or a guarantee of artifact-free output.
+
+    Takes precedence over ``--camera-cadence``. Bypasses pauses, unmatched
+    refresh rates, and subtitles blended into source frames. It does not
+    switch the display refresh rate automatically.
+
 ``--camera-cadence=<yes|no>``
     Experimental AJN camera-pan presentation (default: no). Requires the AJN
     patched libplacebo, ``--vo=gpu-next``, ``--video-sync=display-resample`` and

@@ -5,6 +5,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// The pan experiment preserves every source-frame boundary on an integer
+// display cadence. Allow the usual 23.976/24 clock correction, not 24->60.
+static inline bool mp_camera_pan_smoothing_needed(double frame_duration,
+                                                  double vsync_duration)
+{
+    if (!isfinite(frame_duration) || !isfinite(vsync_duration) ||
+        frame_duration <= 0 || vsync_duration <= 0)
+        return false;
+    double ratio = frame_duration / vsync_duration;
+    return isfinite(ratio) && ratio >= 1.99 &&
+           fabs(ratio - round(ratio)) <= 0.01;
+}
+
 static inline bool mp_camera_cadence_needed(double frame_duration,
                                             double vsync_duration)
 {
