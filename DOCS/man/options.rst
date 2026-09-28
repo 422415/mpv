@@ -6464,6 +6464,15 @@ them.
     refresh rates, and subtitles blended into source frames. It does not
     switch the display refresh rate automatically.
 
+``--camera-pan-half-rate=<yes|no>``
+    With ``--camera-pan-smoothing=yes``, hold each camera position for two
+    display refreshes (default: no). At nominal 72 Hz this gives 36 fps pans
+    while original 23.976 fps drawings retain their source cadence. Source
+    drawing changes are not delayed to the camera update: the current drawing
+    is translated to the held camera position using the adjacent source pair.
+    This changes camera sampling only; it does not switch display modes.
+    Can be toggled during playback to compare with full display-rate pans.
+
 ``--camera-cadence=<yes|no>``
     Experimental AJN camera-pan presentation (default: no). Requires the AJN
     patched libplacebo, ``--vo=gpu-next``, ``--video-sync=display-resample`` and

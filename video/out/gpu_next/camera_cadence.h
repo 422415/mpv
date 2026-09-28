@@ -49,8 +49,39 @@ static inline double mp_camera_cadence_offset(double tick, double vsync_ratio)
 
 struct mp_camera_cadence_clock {
     bool valid;
-    double pts, vsync, group, phase;
+    double pts, vsync, group, phase, sample_pts;
 };
+
+// Hold camera position for two display refreshes without holding the source
+// drawing. A source change on the second refresh can require a negative
+// translation using the preceding pair. Keep queue/source timestamps unchanged.
+static inline double mp_camera_pan_sample(struct mp_camera_cadence_clock *c,
+                                          double pts, double frame_duration,
+                                          double vsync_duration, bool half_rate)
+{
+    if (!half_rate) {
+        c->valid = false;
+        return 0;
+    }
+    double elapsed = pts - c->pts;
+    bool reset = !c->valid || elapsed < 0 || c->group != 2 ||
+                 fabs(vsync_duration - c->vsync) > c->vsync * 0.01;
+    if (reset) {
+        c->phase = 0;
+        c->sample_pts = pts;
+    } else {
+        double ticks = floor(elapsed / vsync_duration + 0.5);
+        bool advance = c->phase + ticks >= 2;
+        c->phase = fmod(c->phase + ticks, 2);
+        if (advance)
+            c->sample_pts = pts - c->phase * vsync_duration;
+    }
+    c->valid = true;
+    c->pts = pts;
+    c->vsync = vsync_duration;
+    c->group = 2;
+    return (c->sample_pts - pts) / frame_duration;
+}
 
 static inline double mp_camera_cadence_sample(struct mp_camera_cadence_clock *c,
                                              double pts, double frame_duration,

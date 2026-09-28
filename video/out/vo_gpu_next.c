@@ -844,6 +844,7 @@ struct gl_next_opts {
     bool inter_preserve;
     bool camera_cadence;
     bool camera_pan_smoothing;
+    bool camera_pan_half_rate;
     struct user_lut lut;
     struct user_lut image_lut;
     struct user_lut target_lut;
@@ -886,6 +887,7 @@ const struct m_sub_options gl_next_conf = {
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
         {"camera-cadence", OPT_BOOL(camera_cadence)},
         {"camera-pan-smoothing", OPT_BOOL(camera_pan_smoothing)},
+        {"camera-pan-half-rate", OPT_BOOL(camera_pan_half_rate)},
 #endif
         {"lut", OPT_STRING(lut.opt), .flags = M_OPT_FILE},
         {"lut-type", OPT_CHOICE_C(lut.type, lut_types)},
@@ -7163,7 +7165,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     camera &= frame->display_synced && !frame->still &&
               frame->num_frames > 1 && !p->paused;
     pl_renderer_set_camera_cadence(p->rr, false, 0);
-    if (!camera)
+    if (!camera && !camera_pan)
         p->camera_clock.valid = false;
 #endif
     camera |= camera_pan;
@@ -7536,7 +7538,11 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
         if (camera) {
             pl_renderer_set_camera_cadence(p->rr, true,
-                camera_pan ? 0 : mp_camera_cadence_sample(&p->camera_clock, qparams.pts,
+                camera_pan ? mp_camera_pan_sample(&p->camera_clock, qparams.pts,
+                                        frame->approx_duration,
+                                        frame->ideal_frame_vsync_duration,
+                                        p->next_opts->camera_pan_half_rate)
+                           : mp_camera_cadence_sample(&p->camera_clock, qparams.pts,
                                         frame->approx_duration,
                                         frame->ideal_frame_vsync_duration));
         }

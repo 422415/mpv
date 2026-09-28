@@ -30,6 +30,29 @@ int main(void)
     assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 24));
     assert(!mp_camera_pan_smoothing_needed(0, 1.0 / 72));
 
+    // 36 fps camera on a 72 Hz display: camera positions hold for two ticks,
+    // original drawings for three. In particular, tick 3 changes drawing but
+    // retains tick 2's camera, requiring -1/3 of the previous source motion.
+    struct mp_camera_cadence_clock pan = {0};
+    for (int tick = 0; tick < 12; tick++) {
+        double pts = tick / 72.0;
+        double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 72, true);
+        double camera = pts * 24 + offset;
+        assert(fabs(camera - (tick / 2) * 2.0 / 3) < 1e-12);
+        if (tick == 3) {
+            assert(floor(pts * 24) == 1);
+            assert(fabs(offset + 1.0 / 3) < 1e-12);
+        }
+        // An OSD redraw must leave the camera phase unchanged.
+        assert(mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 72, true) == offset);
+    }
+    // A missed refresh advances the hold clock; toggling re-anchors it.
+    assert(fabs(mp_camera_pan_sample(&pan, 13.0 / 72, 1.0 / 24, 1.0 / 72, true)
+                + 1.0 / 3) < 1e-12);
+    assert(mp_camera_pan_sample(&pan, 14.0 / 72, 1.0 / 24, 1.0 / 72, false) == 0);
+    assert(mp_camera_pan_sample(&pan, 15.0 / 72, 1.0 / 24, 1.0 / 72, true) == 0);
+    assert(mp_camera_pan_sample(&pan, 0, 1.0 / 24, 1.0 / 72, true) == 0);
+
     // At 24->60, each emulated camera position is held for two refreshes.
     const double camera[] = {0, 0, 0.6, 0.6, 1.6, 1.6, 2.2, 2.2};
     for (int i = 0; i < 8; i++)
