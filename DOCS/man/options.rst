@@ -6479,6 +6479,17 @@ them.
     This changes camera sampling only; it does not switch display modes.
     Can be toggled during playback to compare with full display-rate pans.
 
+``--camera-pan-refreshes=<0-4>``
+    With ``--camera-pan-smoothing=yes``, hold each camera position for this
+    number of display refreshes. For example, 4 gives 30 fps camera movement
+    on a 120 Hz display, while original 24 fps drawings change every fifth
+    refresh. No drawing is delayed to match a camera update.
+
+    The default 0 uses ``--camera-pan-half-rate`` to select one or two
+    refreshes. A nonzero value takes precedence. Pan smoothing is bypassed
+    if the display does not provide at least this many refreshes per source
+    frame. This option does not change the display refresh rate itself.
+
 ``--camera-cadence=<yes|no>``
     Experimental AJN camera-pan presentation (default: no). Requires the AJN
     patched libplacebo, ``--vo=gpu-next``, ``--video-sync=display-resample`` and

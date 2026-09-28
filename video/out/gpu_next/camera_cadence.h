@@ -8,13 +8,14 @@
 // The pan experiment preserves every source-frame boundary on an integer
 // display cadence. Allow the usual 23.976/24 clock correction, not 24->60.
 static inline bool mp_camera_pan_smoothing_needed(double frame_duration,
-                                                  double vsync_duration)
+                                                  double vsync_duration,
+                                                  int refreshes)
 {
     if (!isfinite(frame_duration) || !isfinite(vsync_duration) ||
         frame_duration <= 0 || vsync_duration <= 0)
         return false;
     double ratio = frame_duration / vsync_duration;
-    return isfinite(ratio) && ratio >= 1.99 &&
+    return isfinite(ratio) && ratio >= fmax(1.99, refreshes - 0.01) &&
            fabs(ratio - round(ratio)) <= 0.01;
 }
 
@@ -52,34 +53,34 @@ struct mp_camera_cadence_clock {
     double pts, vsync, group, phase, sample_pts;
 };
 
-// Hold camera position for two display refreshes without holding the source
-// drawing. A source change on the second refresh can require a negative
+// Hold camera position for an integer number of refreshes without holding the
+// source drawing. A source change within the hold can require a negative
 // translation using the preceding pair. Keep queue/source timestamps unchanged.
 static inline double mp_camera_pan_sample(struct mp_camera_cadence_clock *c,
                                           double pts, double frame_duration,
-                                          double vsync_duration, bool half_rate)
+                                          double vsync_duration, int refreshes)
 {
-    if (!half_rate) {
+    if (refreshes <= 1) {
         c->valid = false;
         return 0;
     }
     double elapsed = pts - c->pts;
-    bool reset = !c->valid || elapsed < 0 || c->group != 2 ||
+    bool reset = !c->valid || elapsed < 0 || c->group != refreshes ||
                  fabs(vsync_duration - c->vsync) > c->vsync * 0.01;
     if (reset) {
         c->phase = 0;
         c->sample_pts = pts;
     } else {
         double ticks = floor(elapsed / vsync_duration + 0.5);
-        bool advance = c->phase + ticks >= 2;
-        c->phase = fmod(c->phase + ticks, 2);
+        bool advance = c->phase + ticks >= refreshes;
+        c->phase = fmod(c->phase + ticks, refreshes);
         if (advance)
             c->sample_pts = pts - c->phase * vsync_duration;
     }
     c->valid = true;
     c->pts = pts;
     c->vsync = vsync_duration;
-    c->group = 2;
+    c->group = refreshes;
     return (c->sample_pts - pts) / frame_duration;
 }
 

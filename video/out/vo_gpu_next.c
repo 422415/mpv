@@ -845,6 +845,7 @@ struct gl_next_opts {
     bool camera_cadence;
     bool camera_pan_smoothing;
     bool camera_pan_half_rate;
+    int camera_pan_refreshes;
     struct user_lut lut;
     struct user_lut image_lut;
     struct user_lut target_lut;
@@ -888,6 +889,7 @@ const struct m_sub_options gl_next_conf = {
         {"camera-cadence", OPT_BOOL(camera_cadence)},
         {"camera-pan-smoothing", OPT_BOOL(camera_pan_smoothing)},
         {"camera-pan-half-rate", OPT_BOOL(camera_pan_half_rate)},
+        {"camera-pan-refreshes", OPT_INT(camera_pan_refreshes), M_RANGE(0, 4)},
 #endif
         {"lut", OPT_STRING(lut.opt), .flags = M_OPT_FILE},
         {"lut-type", OPT_CHOICE_C(lut.type, lut_types)},
@@ -7149,12 +7151,18 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     bool will_redraw = frame->display_synced && frame->num_vsyncs > 1;
     bool cache_frame = will_redraw || frame->still || p->paused;
     bool camera = false, camera_pan = false;
+#ifdef PL_HAVE_AJN_CAMERA_CADENCE
+    int pan_refreshes = p->next_opts->camera_pan_refreshes;
+    if (!pan_refreshes)
+        pan_refreshes = p->next_opts->camera_pan_half_rate ? 2 : 1;
+#endif
 #ifdef PL_HAVE_AJN_CAMERA_PAN_SMOOTHING
     camera_pan = p->next_opts->camera_pan_smoothing && !opts->blend_subs &&
                  frame->display_synced && !frame->still &&
                  frame->num_frames > 1 && !p->paused &&
                  mp_camera_pan_smoothing_needed(frame->approx_duration,
-                                                frame->ideal_frame_vsync_duration);
+                                                frame->ideal_frame_vsync_duration,
+                                                pan_refreshes);
     pl_renderer_set_camera_pan_smoothing(p->rr, camera_pan);
 #endif
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
@@ -7541,7 +7549,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                 camera_pan ? mp_camera_pan_sample(&p->camera_clock, qparams.pts,
                                         frame->approx_duration,
                                         frame->ideal_frame_vsync_duration,
-                                        p->next_opts->camera_pan_half_rate)
+                                        pan_refreshes)
                            : mp_camera_cadence_sample(&p->camera_clock, qparams.pts,
                                         frame->approx_duration,
                                         frame->ideal_frame_vsync_duration));

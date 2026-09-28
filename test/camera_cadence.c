@@ -23,12 +23,12 @@ int main(void)
 {
     // Pan smoothing targets exact source/display multiples, including the
     // fractional source rate used with a nominal 72 Hz desktop mode.
-    assert(mp_camera_pan_smoothing_needed(1001.0 / 24000, 1.0 / 72));
-    assert(mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 48));
-    assert(mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 120));
-    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 60));
-    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 24));
-    assert(!mp_camera_pan_smoothing_needed(0, 1.0 / 72));
+    assert(mp_camera_pan_smoothing_needed(1001.0 / 24000, 1.0 / 72, 1));
+    assert(mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 48, 1));
+    assert(mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 120, 1));
+    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 60, 1));
+    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 24, 1));
+    assert(!mp_camera_pan_smoothing_needed(0, 1.0 / 72, 1));
 
     // 36 fps camera on a 72 Hz display: camera positions hold for two ticks,
     // original drawings for three. In particular, tick 3 changes drawing but
@@ -36,7 +36,7 @@ int main(void)
     struct mp_camera_cadence_clock pan = {0};
     for (int tick = 0; tick < 12; tick++) {
         double pts = tick / 72.0;
-        double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 72, true);
+        double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 72, 2);
         double camera = pts * 24 + offset;
         assert(fabs(camera - (tick / 2) * 2.0 / 3) < 1e-12);
         if (tick == 3) {
@@ -44,14 +44,33 @@ int main(void)
             assert(fabs(offset + 1.0 / 3) < 1e-12);
         }
         // An OSD redraw must leave the camera phase unchanged.
-        assert(mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 72, true) == offset);
+        assert(mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 72, 2) == offset);
     }
     // A missed refresh advances the hold clock; toggling re-anchors it.
-    assert(fabs(mp_camera_pan_sample(&pan, 13.0 / 72, 1.0 / 24, 1.0 / 72, true)
+    assert(fabs(mp_camera_pan_sample(&pan, 13.0 / 72, 1.0 / 24, 1.0 / 72, 2)
                 + 1.0 / 3) < 1e-12);
-    assert(mp_camera_pan_sample(&pan, 14.0 / 72, 1.0 / 24, 1.0 / 72, false) == 0);
-    assert(mp_camera_pan_sample(&pan, 15.0 / 72, 1.0 / 24, 1.0 / 72, true) == 0);
-    assert(mp_camera_pan_sample(&pan, 0, 1.0 / 24, 1.0 / 72, true) == 0);
+    assert(mp_camera_pan_sample(&pan, 14.0 / 72, 1.0 / 24, 1.0 / 72, 1) == 0);
+    assert(mp_camera_pan_sample(&pan, 15.0 / 72, 1.0 / 24, 1.0 / 72, 2) == 0);
+    assert(mp_camera_pan_sample(&pan, 0, 1.0 / 24, 1.0 / 72, 2) == 0);
+
+    // 30 fps camera on 120 Hz: four ticks per camera sample, five per source
+    // drawing. Exercise a complete 4/5 cadence cycle and drawing boundaries
+    // that fall inside a held camera sample.
+    assert(mp_camera_pan_smoothing_needed(1001.0 / 24000, 1.0 / 120, 4));
+    assert(!mp_camera_pan_smoothing_needed(1.0 / 24, 1.0 / 72, 4));
+    pan = (struct mp_camera_cadence_clock){0};
+    for (int tick = 0; tick < 40; tick++) {
+        double pts = tick / 120.0;
+        double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 120, 4);
+        double camera = pts * 24 + offset;
+        assert(fabs(camera - (tick / 4) * 4.0 / 5) < 1e-12);
+        assert(camera - tick / 5 >= -1);
+        if (tick == 5 || tick == 10 || tick == 15)
+            assert(fabs(offset + (tick / 5) / 5.0) < 1e-12);
+        assert(mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 120, 4) == offset);
+    }
+    assert(mp_camera_pan_sample(&pan, 40.0 / 120, 1.0 / 24, 1.0 / 120, 2) == 0);
+    assert(mp_camera_pan_sample(&pan, 41.0 / 120, 1.0 / 24, 1.0 / 120, 4) == 0);
 
     // At 24->60, each emulated camera position is held for two refreshes.
     const double camera[] = {0, 0, 0.6, 0.6, 1.6, 1.6, 2.2, 2.2};
