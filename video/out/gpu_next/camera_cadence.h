@@ -50,8 +50,27 @@ static inline double mp_camera_cadence_offset(double tick, double vsync_ratio)
 
 struct mp_camera_cadence_clock {
     bool valid;
+    uint64_t source_signature;
     double pts, vsync, group, phase, sample_pts;
 };
+
+// If camera holds divide a source drawing's display cadence, start a hold
+// when that drawing becomes visible. A seek/startup correction can otherwise
+// leave the hold straddling two drawings: imperfect motion estimates then
+// move the background on a refresh which was supposed to remain unchanged.
+static inline void mp_camera_pan_align_source(struct mp_camera_cadence_clock *c,
+                                              uint64_t signature,
+                                              double frame_duration,
+                                              double vsync_duration,
+                                              int refreshes)
+{
+    double ratio = frame_duration / vsync_duration;
+    double ticks = round(ratio);
+    if (refreshes > 1 && ticks >= refreshes && fabs(ratio - ticks) <= 0.01 &&
+        fmod(ticks, refreshes) == 0 && signature != c->source_signature)
+        c->valid = false;
+    c->source_signature = signature;
+}
 
 // Hold camera position for an integer number of refreshes without holding the
 // source drawing. A source change within the hold can require a negative

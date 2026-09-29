@@ -7543,19 +7543,6 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             qparams.pts = first.pts;
         }
         p->last_pts = qparams.pts;
-#ifdef PL_HAVE_AJN_CAMERA_CADENCE
-        if (camera) {
-            pl_renderer_set_camera_cadence(p->rr, true,
-                camera_pan ? mp_camera_pan_sample(&p->camera_clock, qparams.pts,
-                                        frame->approx_duration,
-                                        frame->ideal_frame_vsync_duration,
-                                        pan_refreshes)
-                           : mp_camera_cadence_sample(&p->camera_clock, qparams.pts,
-                                        frame->approx_duration,
-                                        frame->ideal_frame_vsync_duration));
-        }
-#endif
-
         switch (pl_queue_update(p->queue, &mix, &qparams)) {
         case PL_QUEUE_ERR:
             MP_ERR(vo, "Failed updating frames!\n");
@@ -7571,6 +7558,30 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         case PL_QUEUE_OK:
             break;
         }
+
+#ifdef PL_HAVE_AJN_CAMERA_CADENCE
+        if (camera && mix.num_frames) {
+            if (camera_pan) {
+                // Match libplacebo's current-frame selection, including a
+                // presentation just before the core's next source timestamp.
+                int current = 0;
+                for (int i = 0; i < mix.num_frames && mix.timestamps[i] <= 0; i++)
+                    current = i;
+                mp_camera_pan_align_source(&p->camera_clock, mix.signatures[current],
+                                           frame->approx_duration,
+                                           frame->ideal_frame_vsync_duration,
+                                           pan_refreshes);
+            }
+            pl_renderer_set_camera_cadence(p->rr, true,
+                camera_pan ? mp_camera_pan_sample(&p->camera_clock, qparams.pts,
+                                        frame->approx_duration,
+                                        frame->ideal_frame_vsync_duration,
+                                        pan_refreshes)
+                           : mp_camera_cadence_sample(&p->camera_clock, qparams.pts,
+                                        frame->approx_duration,
+                                        frame->ideal_frame_vsync_duration));
+        }
+#endif
 
         // Update source crop and overlays on all existing frames. We
         // technically own the `pl_frame` struct so this is kosher. This could

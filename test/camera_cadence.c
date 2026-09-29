@@ -72,6 +72,29 @@ int main(void)
     assert(mp_camera_pan_sample(&pan, 40.0 / 120, 1.0 / 24, 1.0 / 120, 2) == 0);
     assert(mp_camera_pan_sample(&pan, 41.0 / 120, 1.0 / 24, 1.0 / 120, 4) == 0);
 
+    // At 144 Hz / 24 fps, each drawing has two three-refresh camera holds.
+    // A replay may start with either wrong phase. Re-anchor at the selected
+    // drawing, so a held camera position never straddles a pose change.
+    for (int phase = 1; phase <= 2; phase++) {
+        pan = (struct mp_camera_cadence_clock){
+            .valid = true, .source_signature = 10, .phase = phase,
+            .vsync = 1.0 / 144, .group = 3, .sample_pts = -phase / 144.0,
+        };
+        for (int tick = 0; tick < 18; tick++) {
+            double pts = tick / 144.0;
+            mp_camera_pan_align_source(&pan, 11 + tick / 6, 1.0 / 24, 1.0 / 144, 3);
+            double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 144, 3);
+            assert(fabs(pts * 24 + offset - (tick / 3) * 0.5) < 1e-12);
+            mp_camera_pan_align_source(&pan, 11 + tick / 6, 1.0 / 24, 1.0 / 144, 3);
+            assert(mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 144, 3) == offset);
+        }
+    }
+    // Four-refresh holds do not divide five-refresh drawings (30 on 120).
+    // Their deliberate cross-drawing cadence must keep its existing phase.
+    pan = (struct mp_camera_cadence_clock){.valid=true, .source_signature=1};
+    mp_camera_pan_align_source(&pan, 2, 1.0 / 24, 1.0 / 120, 4);
+    assert(pan.valid);
+
     // At 24->60, each emulated camera position is held for two refreshes.
     const double camera[] = {0, 0, 0.6, 0.6, 1.6, 1.6, 2.2, 2.2};
     for (int i = 0; i < 8; i++)
