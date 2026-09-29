@@ -6453,9 +6453,11 @@ them.
     display refresh rate close to an integer multiple of the source rate,
     at least 2x (for example, 23.976 fps at nominal 72 Hz).
 
-    Samples a coherent camera translation at every display refresh while
+    Samples a coherent camera translation at the selected camera rate while
     keeping the original drawing changes on their source timeline. It does
-    not blend drawings. Motion and image processing stay on the GPU. The
+    not blend drawings. Automatic pacing uses 30 fps at nominal 120 Hz
+    (29.97 fps at 119.88 Hz), and one update per refresh on other displays.
+    Motion and image processing stay on the GPU. The
     whole source image moves rigidly; shots with inconsistent motion are
     left unchanged. This is a conservative translation experiment, not
     general animation interpolation or a guarantee of artifact-free output.
@@ -6485,8 +6487,11 @@ them.
     on a 120 Hz display, while original 24 fps drawings change every fifth
     refresh. No drawing is delayed to match a camera update.
 
-    The default 0 uses ``--camera-pan-half-rate`` to select one or two
-    refreshes. A nonzero value takes precedence. Pan smoothing is bypassed
+    The default 0 selects four refreshes on nominal 120 Hz displays and one
+    refresh elsewhere. ``--camera-pan-half-rate=yes`` selects two instead.
+    A nonzero value takes precedence over both automatic selection and
+    half-rate mode. Automatic selection follows display refresh changes.
+    Pan smoothing is bypassed
     if the display does not provide at least this many refreshes per source
     frame. This option does not change the display refresh rate itself.
 

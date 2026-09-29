@@ -5,6 +5,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// Resolve automatic camera pacing from the physical display interval, not
+// the source-time interval adjusted by display-resample. Include 119.88 Hz
+// modes and small timing-estimate variations in the nominal 120 Hz family.
+static inline int mp_camera_pan_refresh_count(int configured, bool half_rate,
+                                               double display_vsync)
+{
+    if (configured > 0)
+        return configured;
+    if (half_rate)
+        return 2;
+    return display_vsync >= 1.0 / 120.5 && display_vsync <= 1.0 / 119.5 ? 4 : 1;
+}
+
 // The pan experiment preserves every source-frame boundary on an integer
 // display cadence. Allow the usual 23.976/24 clock correction, not 24->60.
 static inline bool mp_camera_pan_smoothing_needed(double frame_duration,

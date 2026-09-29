@@ -7152,9 +7152,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     bool cache_frame = will_redraw || frame->still || p->paused;
     bool camera = false, camera_pan = false;
 #ifdef PL_HAVE_AJN_CAMERA_CADENCE
-    int pan_refreshes = p->next_opts->camera_pan_refreshes;
-    if (!pan_refreshes)
-        pan_refreshes = p->next_opts->camera_pan_half_rate ? 2 : 1;
+    int pan_refreshes = mp_camera_pan_refresh_count(
+        p->next_opts->camera_pan_refreshes, p->next_opts->camera_pan_half_rate,
+        frame->vsync_interval);
 #endif
 #ifdef PL_HAVE_AJN_CAMERA_PAN_SMOOTHING
     camera_pan = p->next_opts->camera_pan_smoothing && !opts->blend_subs &&

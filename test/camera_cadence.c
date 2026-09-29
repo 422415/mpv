@@ -21,6 +21,18 @@ static void check_rate(double source, double display, bool needed)
 
 int main(void)
 {
+    // Automatic 30 fps camera pacing on nominal 120 Hz screens. Explicit
+    // test overrides and all other display modes retain their previous rate.
+    assert(mp_camera_pan_refresh_count(0, false, 1.0 / 120) == 4);
+    assert(mp_camera_pan_refresh_count(0, false, 1001.0 / 120000) == 4);
+    assert(mp_camera_pan_refresh_count(0, false, 1.0 / 120.1) == 4);
+    assert(mp_camera_pan_refresh_count(0, false, 1001.0 / 48000) == 1);
+    assert(mp_camera_pan_refresh_count(0, false, 1.0 / 144) == 1);
+    assert(mp_camera_pan_refresh_count(1, false, 1.0 / 120) == 1);
+    assert(mp_camera_pan_refresh_count(3, true, 1.0 / 120) == 3);
+    assert(mp_camera_pan_refresh_count(0, true, 1.0 / 120) == 2);
+    assert(mp_camera_pan_refresh_count(0, false, 0) == 1);
+
     // Pan smoothing targets exact source/display multiples, including the
     // fractional source rate used with a nominal 72 Hz desktop mode.
     assert(mp_camera_pan_smoothing_needed(1001.0 / 24000, 1.0 / 72, 1));
@@ -61,7 +73,11 @@ int main(void)
     pan = (struct mp_camera_cadence_clock){0};
     for (int tick = 0; tick < 40; tick++) {
         double pts = tick / 120.0;
-        double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24, 1.0 / 120, 4);
+        int refreshes = mp_camera_pan_refresh_count(0, false, 1.0 / 120);
+        mp_camera_pan_align_source(&pan, 1 + tick / 5, 1.0 / 24,
+                                   1.0 / 120, refreshes);
+        double offset = mp_camera_pan_sample(&pan, pts, 1.0 / 24,
+                                             1.0 / 120, refreshes);
         double camera = pts * 24 + offset;
         assert(fabs(camera - (tick / 4) * 4.0 / 5) < 1e-12);
         assert(camera - tick / 5 >= -1);
@@ -71,6 +87,14 @@ int main(void)
     }
     assert(mp_camera_pan_sample(&pan, 40.0 / 120, 1.0 / 24, 1.0 / 120, 2) == 0);
     assert(mp_camera_pan_sample(&pan, 41.0 / 120, 1.0 / 24, 1.0 / 120, 4) == 0);
+
+    // Moving between display modes reselects the rate and starts a new hold.
+    int refreshes = mp_camera_pan_refresh_count(0, false, 1.0 / 48);
+    assert(mp_camera_pan_sample(&pan, 42.0 / 120, 1.0 / 24, 1.0 / 48,
+                                refreshes) == 0);
+    refreshes = mp_camera_pan_refresh_count(0, false, 1.0 / 120);
+    assert(mp_camera_pan_sample(&pan, 43.0 / 120, 1.0 / 24, 1.0 / 120,
+                                refreshes) == 0);
 
     // At 144 Hz / 24 fps, each drawing has two three-refresh camera holds.
     // A replay may start with either wrong phase. Re-anchor at the selected
