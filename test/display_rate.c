@@ -2,6 +2,9 @@
 #undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "video/out/display_rate.h"
 
 static double choose_rate(struct mp_display_rate rate, const unsigned *modes, int n)

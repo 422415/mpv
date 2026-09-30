@@ -86,7 +86,7 @@ static inline int mp_display_rate_analyze(double *pts, int count,
 static inline double mp_display_rate_vfr_score(struct mp_display_rate rate,
                                                double hz)
 {
-    bool exact = true, near = true;
+    bool exact = true, near_match = true;
     double error = 0, duration = 0;
     for (int i = 0; i < rate.num_cadences; i++) {
         struct mp_display_cadence c = rate.cadences[i];
@@ -98,7 +98,7 @@ static inline double mp_display_rate_vfr_score(struct mp_display_rate rate,
         double relative = distance / interval;
         bool fits = nearest >= 1 && relative < 0.0005;
         exact &= fits;
-        near &= nearest >= 1 && relative < 0.002;
+        near_match &= nearest >= 1 && relative < 0.002;
         double f = fits ? 0 : fmin(0.5, distance * hz);
         double weight = interval * c.frames;
         error += weight * f * (1 - f) / (hz * hz);
@@ -106,7 +106,7 @@ static inline double mp_display_rate_vfr_score(struct mp_display_rate rate,
     }
     if (exact)
         return 1000000 - hz;
-    if (near)
+    if (near_match)
         return 500000 - hz;
     // Milliseconds squared keep the score well-scaled. Higher remains better.
     return 1 / (1 + 1000000 * error / duration);
