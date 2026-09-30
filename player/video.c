@@ -1237,13 +1237,15 @@ void write_video(struct MPContext *mpctx)
     {
         mpctx->display_rate_initialized = true;
         struct sh_stream *sh = track ? track->stream : NULL;
-        struct mp_display_rate rate = {.variable = true};
-        if (sh && sh->whole_file_fps > 0) {
-            rate.fps = sh->whole_file_fps * opts->playback_speed;
+        struct mp_display_rate rate = {.variable = true, .scale = opts->playback_speed};
+        if (sh) {
             // Preserve a filter's declared cadence multiplier, e.g. RIFE.
             if (sh->codec->fps > 0 && vo_c->filter->container_fps > 0)
-                rate.fps *= vo_c->filter->container_fps / sh->codec->fps;
+                rate.scale *= vo_c->filter->container_fps / sh->codec->fps;
+            rate.fps = sh->whole_file_fps * rate.scale;
             rate.variable = !isfinite(rate.fps) || rate.fps <= 0;
+            rate.cadences = sh->display_cadences;
+            rate.num_cadences = sh->num_display_cadences;
         }
         MP_VERBOSE(mpctx, "Whole-file display refresh selection: %s, %.3f fps.\n",
                    rate.variable ? "mixed/unknown" : "CFR", rate.fps);

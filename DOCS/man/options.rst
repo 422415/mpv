@@ -1321,8 +1321,8 @@ Video
     decoding before playback. A complete scan can establish CFR; a short steady
     opening cannot establish that the rest of a file is CFR. The scan stops
     between packets after five seconds or one million packets. Network inputs
-    are not scanned. Mixed cadence, unavailable timestamps and incomplete scans
-    use the highest supported refresh rate for the whole playback.
+    are not scanned. Unavailable timestamps and incomplete scans use the highest
+    supported refresh rate for the whole playback.
     This does not change video timestamps, interpolate frames, or alter
     ``--video-sync``.
 
@@ -1332,11 +1332,21 @@ Video
     (within 0.2%) is preferred, for example 24 Hz for 23.976 fps when fractional
     modes are unavailable. Exact multiples always take priority over near ones.
     A near match retains a small timing difference; this option does not enable
-    playback speed correction. Variable files, and fixed rates without an
-    exact or near match, select the highest supported progressive rate at the
-    current resolution, orientation and desktop bit depth. This accommodates
-    mixed-rate material on TVs limited to 60 Hz; it cannot make arbitrary VFR
-    timings fit a fixed refresh grid perfectly.
+    playback speed correction.
+
+    For completely scanned variable-rate files, retain the cadence runs and
+    their durations. Prefer the lowest exact common multiple, then a near
+    common multiple, of all the measured cadences. For example, mixed 23.976
+    and 29.97 fps sections prefer 119.88 Hz over 144 Hz when available. If no
+    common multiple exists, choose the mode with the lowest estimated squared
+    frame-hold timing error, weighted by each cadence's duration in the file.
+    Container timestamp rounding is accounted for. This can select a lower
+    refresh than the maximum, including on TVs limited to 60 Hz. It does not
+    guarantee perfect presentation of arbitrary VFR timestamps.
+
+    All choices preserve the current resolution, orientation and desktop bit
+    depth and use progressive modes. Fixed rates without an exact or near
+    match, and unverified files, retain the highest-supported-rate fallback.
 
     Only the display containing the player is changed. Audio/video pause and a
     notice appears at the top of the picture, with a half-second interval for it

@@ -89,11 +89,21 @@ void mp_probe_display_rates(struct demuxer *demux, int stream_flags)
             struct samples *s = &samples[n];
             if (s->selected && !s->invalid) {
                 struct sh_stream *sh = demux_get_stream(demux, n);
-                sh->whole_file_fps = mp_display_rate_analyze(s->pts, s->count);
-                MP_VERBOSE(demux, "Display refresh scan: track %d, %d timestamps, %s (%.3f fps).\n",
+                struct mp_display_cadence *cadences =
+                    talloc_array(sh, struct mp_display_cadence, s->count);
+                int runs = mp_display_rate_analyze(s->pts, s->count, cadences);
+                if (runs) {
+                    sh->display_cadences = talloc_realloc(sh, cadences,
+                                                        struct mp_display_cadence, runs);
+                    sh->num_display_cadences = runs;
+                    sh->whole_file_fps = runs == 1 ? 1 / sh->display_cadences[0].interval : 0;
+                } else {
+                    talloc_free(cadences);
+                }
+                MP_VERBOSE(demux, "Display refresh scan: track %d, %d timestamps, %s (%.3f fps, %d cadence runs).\n",
                            sh->demuxer_id, s->count,
-                           sh->whole_file_fps > 0 ? "CFR" : "mixed/unknown",
-                           sh->whole_file_fps);
+                           sh->whole_file_fps > 0 ? "CFR" : runs ? "VFR" : "unknown",
+                           sh->whole_file_fps, runs);
             }
         }
     } else {
