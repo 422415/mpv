@@ -69,6 +69,13 @@ static float preferred_ref_luma(struct ra_ctx *ctx)
     return mp_dxgi_sdr_white_level_from_hwnd(&p->dxgi_ctx, vo_w32_hwnd(ctx->vo));
 }
 
+static bool check_visible(struct ra_ctx *ctx)
+{
+    // Embedded clients can configure the VO before showing their parent window.
+    // Avoid acquiring swapchain images until the whole window hierarchy is visible.
+    return IsWindowVisible(vo_w32_hwnd(ctx->vo));
+}
+
 static bool win_init(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
@@ -94,6 +101,7 @@ static bool win_init(struct ra_ctx *ctx)
         .color_depth = color_depth,
         .preferred_csp = preferred_csp,
         .preferred_ref_luma = preferred_ref_luma,
+        .check_visible = check_visible,
     };
 
     VkInstance inst = vk->vkinst->instance;
