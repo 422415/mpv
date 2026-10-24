@@ -1,5 +1,5 @@
 /*
- * aji.h — AnimeJaNai inference shim, C ABI (version 8).
+ * aji.h — AnimeJaNai inference shim, C ABI (version 9).
  *
  * Boundary between the mpv filter (mingw/gcc world) and the inference
  * backends (MSVC world on Windows). Only C types and opaque handles
@@ -39,7 +39,7 @@ extern "C" {
 #  define AJI_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define AJI_API_VERSION 8
+#define AJI_API_VERSION 9
 
 typedef struct aji_ctx aji_ctx;
 
@@ -50,11 +50,20 @@ enum aji_format {
                               full-resolution chroma. Valid for input and
                               output; TensorRT backend only. */
     AJI_FMT_RGB10A2 = 4,   /* packed 10-bit RGB (DXGI R10G10B10A2 / mpv
-                              x2bgr10: R in the low 10 bits). DirectML only —
-                              what mpv hwuploads a 4:4:4 source to on D3D11.
-                              Already RGB, so the backend skips the YUV
-                              matrix and round-trips it as RGB. */
+                              x2bgr10: R in the low 10 bits). DirectML input
+                              only — what mpv hwuploads a 4:4:4 source to on
+                              D3D11. Already RGB, so the backend skips the
+                              YUV->RGB matrix; output is 4:2:0. */
+    AJI_FMT_YUV444P10MSB = 5, /* 10-bit-in-16 (MSB) planar 4:4:4, CUDA */
+    AJI_FMT_YUV444P12MSB = 6, /* 12-bit-in-16 (MSB) planar 4:4:4, CUDA */
 };
+
+static inline int aji_format_is_444(int format)
+{
+    return format == AJI_FMT_YUV444P16 ||
+           format == AJI_FMT_YUV444P10MSB ||
+           format == AJI_FMT_YUV444P12MSB;
+}
 
 enum aji_matrix {
     AJI_MATRIX_BT601  = 1,
@@ -129,6 +138,9 @@ typedef struct aji_frame {
     ptrdiff_t stride[3];      /* bytes */
 } aji_frame;
 
+/* Additive policy capability. async_build=2 checks cached engines without
+ * starting a builder or deleting incompatible engines. Query before use. */
+AJI_EXPORT int aji_stream_policy_version(void);
 AJI_EXPORT aji_ctx *aji_create(const aji_create_params *params);
 
 /* Select the slot used by the next aji_configure() (conf mode). */
@@ -148,7 +160,12 @@ AJI_EXPORT int aji_configure(aji_ctx *c, int w, int h, double fps,
  * ticket taken after this call completes (see aji_flush). Successive
  * calls are ordered on the same stream/queue, so queuing the next frame
  * before the previous one completes is safe. Frame dims must match the
- * last aji_configure(). */
+ * last aji_configure().
+ *
+ * The output format is independent of the input: any 4:2:0 input (NV12 or
+ * P010) may be written as NV12, P010 (e.g. an 8-bit source to a 10-bit file,
+ * or the reverse) or YUV444P16 (TensorRT only); the backend matrixes and
+ * quantizes to the output format. */
 AJI_EXPORT int aji_infer(aji_ctx *c, const aji_frame *in,
                          const aji_frame *out, void *cu_stream);
 
@@ -178,6 +195,17 @@ AJI_EXPORT int aji_scale_factor(aji_ctx *c);
  * num/den if RIFE is active after the last aji_configure(), else 0. */
 AJI_EXPORT int aji_rife_factor(aji_ctx *c, int *num, int *den);
 
+/* RIFE ordering of the active chain. Returns 1 if RIFE is active AND runs
+ * before the upscale models (interpolating source-resolution frames, which
+ * the upscale models then process), else 0 (RIFE inactive, or the default
+ * order where it interpolates the already-upscaled frames). When this returns
+ * 1, aji_infer_rife() takes source-resolution frame pairs and the caller
+ * upscales each interpolated frame with aji_infer(); when 0, the caller
+ * upscales first and aji_infer_rife() takes the upscaled pairs. Added without
+ * an API_VERSION bump: purely additive, callers built against an older header
+ * simply never query it and get the default order. */
+AJI_EXPORT int aji_rife_before_upscale(aji_ctx *c);
+
 /* Pre-RIFE downscale (rife-first only). When aji_rife_before_upscale() returns
  * 1 and the active chain's first model carries a "resize before upscale", this
  * returns 1 and fills (work_w, work_h): the resolution the caller must
@@ -202,8 +230,12 @@ AJI_EXPORT int aji_resize(aji_ctx *c, const aji_frame *in,
  * per frame. */
 AJI_EXPORT int aji_poll(aji_ctx *c);
 
-/* Interpolate between two already-upscaled frames (dims = configure's
- * output dims) at time point t in (0,1). Returns AJI_OK with *out
+/* Interpolate between two frames at time point t in (0,1). In the default
+ * order the inputs are already-upscaled frames (dims = configure's output
+ * dims); when aji_rife_before_upscale() returns 1 they are source-resolution
+ * frames (dims = configure's input dims) and the caller upscales the result.
+ * Either way the dims must match what the active chain configured. Returns
+ * AJI_OK with *out
  * written, or AJI_SCENE if the pair straddles a scene change (out is
  * untouched; emit a duplicate of `a` instead, like the reference
  * pipeline). The documented synchronous exception to the ticket model:
@@ -212,6 +244,48 @@ AJI_EXPORT int aji_poll(aji_ctx *c);
 AJI_EXPORT int aji_infer_rife(aji_ctx *c, const aji_frame *a,
                               const aji_frame *b, double t,
                               const aji_frame *out, void *cu_stream);
+
+/* Optional additive ABI for an isolated scene detector. No existing entry
+ * point or structure changes. Query support on the configured dispatcher:
+ * older backend libraries can still be used for ordinary interpolation.
+ * scene: -1 = built-in detector, 0 = continuous pair, 1 = cut (AJI_SCENE).
+ * The caller owns pair identity, timeouts and fallback. A continuous decision
+ * explicitly replaces the built-in decision, rather than adding another veto.
+ * All normal frame validation, GPU completion and output ownership still apply. */
+AJI_EXPORT int aji_rife_scene_supported(aji_ctx *c);
+AJI_EXPORT int aji_infer_rife_with_scene(aji_ctx *c, const aji_frame *a,
+                              const aji_frame *b, double t,
+                              const aji_frame *out, void *cu_stream, int scene);
+
+/* Temporal (multi-frame) models. A chain model whose input takes T = 2r+1
+ * frames (oldest first, the frame to upscale in the middle) is a temporal
+ * step: it needs the neighboring source frames, so a chain containing one
+ * is driven through aji_ingest + aji_infer_seq instead of aji_infer.
+ *
+ * Returns r after aji_configure(): 0 when the active chain has no temporal
+ * step (use aji_infer as before). Both backends; DirectML needs a 4-D
+ * [1, T*3, H, W] model input. */
+AJI_EXPORT int aji_temporal_radius(aji_ctx *c);
+
+/* Add one source frame to the frame history under a caller-assigned
+ * sequence number: consecutive source frames take consecutive numbers (a
+ * gap is a missing frame). Ingesting a number already held is a no-op, so
+ * callers may ingest ahead freely. The history keeps the last 2r+5 numbers
+ * ingested: ingest at most r+4 frames past the next aji_infer_seq center.
+ * Input rules are aji_infer's. Enqueues on cu_stream like aji_infer. */
+AJI_EXPORT int aji_ingest(aji_ctx *c, const aji_frame *in, uint64_t seq,
+                          void *cu_stream);
+
+/* Upscale frame `seq` (which must be ingested) from the window
+ * seq-r .. seq+r. Window frames that are not held (stream start, after a
+ * reset, end of stream) or lie across a scene cut from the center are
+ * replaced by the nearest frame on the center's side. Enqueue/ticket
+ * semantics and output rules are aji_infer's. */
+AJI_EXPORT int aji_infer_seq(aji_ctx *c, uint64_t seq, const aji_frame *out,
+                             void *cu_stream);
+
+/* Forget the frame history (seek / discontinuity). */
+AJI_EXPORT void aji_temporal_reset(aji_ctx *c);
 
 AJI_EXPORT const char *aji_last_error(aji_ctx *c);
 

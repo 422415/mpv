@@ -395,6 +395,8 @@ typedef struct MPContext {
     // The newest frame is at index 0.
     struct frame_info *past_frames;
     int num_past_frames;
+    bool display_rate_initialized;
+    int display_rate_section; // -1: whole-file policy, otherwise a CFR section
 
     double last_idle_tick;
     double next_cache_update;
@@ -435,6 +437,8 @@ typedef struct MPContext {
     int remaining_ab_loops;
 
     bool paused_for_cache;
+    double display_rate_resume_time; // deadline for notice or settling hold
+    struct mp_display_rate *display_rate_pending; // apply after the notice
     bool demux_underrun;
     double cache_stop_time;
     int cache_buffer;
@@ -476,6 +480,7 @@ typedef struct MPContext {
     char *open_format;
     int open_url_flags;
     bool open_for_prefetch;
+    bool open_probe_display_rate;
     bool demuxer_changed;
     // --- All fields below are owned by open_thread, unless open_done was set
     //     to true.
@@ -509,6 +514,8 @@ struct mp_abort_entry {
 void reset_audio_state(struct MPContext *mpctx);
 void reinit_audio_chain(struct MPContext *mpctx);
 int init_audio_decoder(struct MPContext *mpctx, struct track *track);
+void uninit_audio_decoder(struct MPContext *mpctx);
+void reinit_audio_decoder(struct MPContext *mpctx);
 int reinit_audio_filters(struct MPContext *mpctx);
 double playing_audio_pts(struct MPContext *mpctx);
 void fill_audio_out_buffers(struct MPContext *mpctx);
@@ -532,6 +539,9 @@ void mp_write_watch_later_conf(struct MPContext *mpctx);
 void mp_delete_watch_later_conf(struct MPContext *mpctx, const char *file);
 struct playlist_entry *mp_check_playlist_resume(struct MPContext *mpctx,
                                                 struct playlist *playlist);
+
+// display_rate.c
+void mp_probe_display_rates(struct demuxer *demux, int stream_flags);
 
 // loadfile.c
 void mp_abort_playback_async(struct MPContext *mpctx);
@@ -687,6 +697,8 @@ bool disc_nav_mouse_pos_to_src(struct MPContext *mpctx, int src_w, int src_h,
 // video.c
 void reset_video_state(struct MPContext *mpctx);
 int init_video_decoder(struct MPContext *mpctx, struct track *track);
+void uninit_video_decoder(struct MPContext *mpctx);
+void reinit_video_decoder(struct MPContext *mpctx);
 void reinit_video_chain(struct MPContext *mpctx);
 void reinit_video_chain_src(struct MPContext *mpctx, struct track *track);
 int reinit_video_filters(struct MPContext *mpctx);

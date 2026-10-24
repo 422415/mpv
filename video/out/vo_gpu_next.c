@@ -101,12 +101,45 @@ struct osd_entry {
     // WP-J3: the used extent of result_tex for that compose -- the region a
     // cross-state reuse has to copy out of the sibling entry.
     int built_used_w, built_used_h;
+    int change_id;            // item change_id uploaded into tex (0 = none)
 };
 
 // Ring of streaming upload buffers cycled across uploads, so a buffer is never
 // reused while its previous async upload is still in flight (which would make
 // pl_buf_write block). Sized well above the in-flight depth.
 #define NUM_OVERLAY_BUFS 16
+
+// Edge/work-list upload staging for the GPU glyph rasterizer (see
+// gc_staged_tex_upload): a stream ring with slots of 1/RASTER_STAGE_EXTRA_DIV
+// of the pool's worst-frame byte size, plus one buffer floored to the full size
+// (~166 MB at 8K) for the rare upload that does not fit a slot.
+#define RASTER_STAGE_RING      1
+#define RASTER_STAGE_EXTRA_DIV 4
+
+// Stream rings: per-frame data the CPU hands to the GPU (gather glyph lists,
+// raster edge/work-list uploads) used to be written with pl_buf_write into a
+// buffer the GPU had just used. With resizable BAR such buffers are mapped, so
+// that write is a memcpy that first waits until the GPU is done with the
+// buffer. Under vsync-paced presentation (video-sync=display-*) the swapchain
+// queue is full and the previous frame's work only runs after its image is
+// acquired, so the wait was a whole vsync inside sub-composite (40.5 ms p50 at
+// 8K/23.976 Hz) and the present guard showed stale signs on moving text.
+// Instead, data is copied into persistently mapped buffers at a monotonically
+// increasing offset: a range is never written after a submitted command could
+// read it, and a slot restarts from 0 only once the GPU is done with it, so
+// nothing waits. When every slot is busy a new one is added (up to
+// STREAM_RING_MAX), and only past that does the caller fall back.
+#define STREAM_RING_MAX 8
+#define GATHER_SLOT_VEC4 16384             // 256 KiB gather ring slots
+
+struct stream_ring {
+    pl_buf slot[STREAM_RING_MAX];
+    int num, cur;
+    size_t off;                // next free byte in slot[cur]
+    size_t slot_size;
+    bool storable;
+    bool grow_failed;          // stop adding slots
+};
 
 // WP-E: glyph atlas is split into GC_SEGMENTS horizontal eviction segments. When
 // the active packing region can't fit a glyph, the packer advances (ring-style)
@@ -280,9 +313,9 @@ struct osd_guard {
     // granularity: each committed overlay records which OSD object
     // (render_index) it belongs to and the item's change_id at build time.
     // On a bail, SUB overlays are always served (stale subs, current rules);
-    // an OSD overlay is served only when its item is present now with the
-    // SAME change_id -- a churning OSD item (stats page, OSC) goes empty for
-    // that one frame instead of taking the still-valid subs down with it.
+    // Text/script OSD may reuse a still-visible item for one delayed build;
+    // requiring the same change_id would blank stats/OSC on each refresh
+    // that misses the deadline. Other overlay types require unchanged data.
     // build_* is filled during the build; committed into good_* only on a
     // complete build. bail_overlays is the compact serve list a bail builds
     // (it must not mutate the good state's own overlays array).
@@ -631,10 +664,12 @@ struct priv {
     // being uploaded (only used when built with HAVE_ASS_OUTLINE_DEFERRED).
     pl_tex edge_tex;                         // rgba32f segment pool (2 texels/seg)
     float *ebuf; int ebuf_cap;               // CPU segment scratch (in float units)
-    pl_buf edge_stage;                       // WP-H14 (c1): edge upload staging (was a per-call slab)
+    pl_buf edge_stage[RASTER_STAGE_RING];    // WP-H14 (c1): edge upload staging ring (was a per-call slab)
     pl_tex work_tex;                         // batched raster: one 16x16 tile per workgroup
     float *wbuf; int wbuf_cap;               // CPU work-list scratch (in float units)
-    pl_buf work_stage;                       // WP-H14 (c1): work-list upload staging (was a per-call slab)
+    pl_buf work_stage[RASTER_STAGE_RING];    // WP-H14 (c1): work-list upload staging ring
+    struct stream_ring raster_stream;        // edge/work-list uploads (gc_staged_tex_upload)
+    struct stream_ring gather_stream;        // gather glyph lists (osd_combine_gather)
 
     struct mp_rect src, dst;
     struct mp_osd_res osd_res;
@@ -662,9 +697,12 @@ struct priv {
     double last_pts;
     bool is_interpolated;
     bool want_reset;
+    bool want_seek_reset;
     bool flush_cache;
     bool frame_pending;
     bool paused;
+    int last_ref_white;
+    int last_srgb_power22;
 
     pl_options pars;
     struct m_config_cache *opts_cache;
@@ -790,6 +828,11 @@ struct priv {
     // one frame (a 4th use would rebind a buffer whose upload may still be in
     // flight; pl_buf_write blocks on busy buffers). Info; 0 in outline mode.
     int64_t cnt_staging_wrap, stat_staging_wrap;
+    // Stream-ring reservations that found no free slot, so the caller fell
+    // back to a path that can wait on the GPU (gather: uniform-array glyph
+    // list; raster: the floored staging buffer). Info.
+    int64_t cnt_gather_ubo, stat_gather_ubo;
+    int64_t cnt_stream_full, stat_stream_full;
     unsigned stage_frame_base;               // glyph_stage_idx at frame start
     // WP-H1b: glyphs uploaded/rasterized into the atlas by the idle pre-fill
     // (i.e. atlas-fill work moved OFF the frame that first shows them).
@@ -1339,6 +1382,95 @@ static const char *const osd_combine_gather_body =
     "}\n"
     "imageStore(acc, g, vec4(a, 0.0, 0.0, 0.0));\n";
 
+// Same as osd_combine_gather_body, reading the list at gl[base] in a storage
+// buffer instead of a uniform array.
+static const char *const osd_combine_gather_ssbo_body =
+    "ivec2 g = ivec2(gl_GlobalInvocationID.xy);\n"
+    "if (g.x >= bw || g.y >= bh) return;\n"
+    "float a = imageLoad(acc, g).r;\n"
+    "for (int k = 0; k < nglyph; k++) {\n"
+    "    vec4 A = gl[base+2*k], B = gl[base+2*k+1];\n"
+    "    int dx=int(A.x), dy=int(A.y);\n"
+    "    if (g.x >= dx && g.y >= dy && g.x < dx+int(A.z) && g.y < dy+int(A.w)) {\n"
+    "        ivec2 s = ivec2(int(B.x)+g.x-dx, int(B.y)+g.y-dy);\n"
+    "        a += B.z > 0.5 ? texelFetch(tatlas, s, 0).r : texelFetch(atlas, s, 0).r;\n"
+    "    }\n"
+    "}\n"
+    "imageStore(acc, g, vec4(a, 0.0, 0.0, 0.0));\n";
+
+static bool stream_slot_add(struct priv *p, struct stream_ring *r)
+{
+    if (r->num == STREAM_RING_MAX || r->grow_failed || !r->slot_size)
+        return false;
+    if (r->storable && r->slot_size > p->gpu->limits.max_ssbo_size)
+        return false;
+    pl_buf *buf = &r->slot[r->num];
+    *buf = pl_buf_create(p->gpu, pl_buf_params(.size = r->slot_size,
+                                               .storable = r->storable,
+                                               .host_mapped = true));
+    if (*buf && !(*buf)->data)
+        pl_buf_destroy(p->gpu, buf);
+    if (!*buf) {
+        r->grow_failed = true;
+        return false;
+    }
+    r->cur = r->num++;
+    r->off = 0;
+    return true;
+}
+
+// Reserve `bytes` (offset aligned to `align`) in a slot of `r`. Returns the
+// slot and sets *off, or NULL when no slot is free; the caller then uses its
+// fallback path. See STREAM_RING_MAX for why this never waits.
+static pl_buf stream_reserve(struct priv *p, struct stream_ring *r,
+                             size_t bytes, size_t align, size_t *off)
+{
+    if (bytes > r->slot_size)
+        return NULL;
+    size_t o = MP_ALIGN_UP(r->off, align);
+    if (r->num && o + bytes <= r->slot_size)
+        goto take;
+    for (int i = 1; i <= r->num; i++) {
+        int k = (r->cur + i) % r->num;
+        if (!pl_buf_poll(p->gpu, r->slot[k], 0)) {
+            r->cur = k;
+            o = 0;
+            goto take;
+        }
+    }
+    if (!stream_slot_add(p, r)) {
+        p->cnt_stream_full++;
+        return NULL;
+    }
+    o = 0;
+
+take:
+    *off = o;
+    r->off = o + bytes;
+    return r->slot[r->cur];
+}
+
+// (Re)size `r` to `slot_size` and pre-create `n` slots, so playback normally
+// never allocates. Slots in flight are freed by libplacebo once idle.
+static void stream_ring_prealloc(struct priv *p, struct stream_ring *r,
+                                 size_t slot_size, bool storable, int n)
+{
+    if (r->slot_size != slot_size || r->storable != storable) {
+        for (int i = 0; i < r->num; i++)
+            pl_buf_destroy(p->gpu, &r->slot[i]);
+        *r = (struct stream_ring) { .slot_size = slot_size, .storable = storable };
+    }
+    while (r->num < n && stream_slot_add(p, r))
+        ;
+}
+
+static void stream_ring_destroy(struct priv *p, struct stream_ring *r)
+{
+    for (int i = 0; i < r->num; i++)
+        pl_buf_destroy(p->gpu, &r->slot[i]);
+    *r = (struct stream_ring) {0};
+}
+
 // gl holds nglyph (<= GATHER_MAXG) entries of 2 vec4 each: [dx,dy,w,h][sax,say,
 // atlas,_]; the caller must pass a full GATHER_MAXG-sized array (unused tail is
 // never read by the shader). atlas != 0 selects tatlas -- WP-H10: ONE chain
@@ -1365,17 +1497,36 @@ static void osd_combine_gather(struct priv *p, pl_tex acc, const float *gl,
         { .desc = { .name="tatlas", .type=PL_DESC_SAMPLED_TEX, .binding=2 },
           .binding = { .object=tatlas } },
     };
+    size_t gloff = 0;
+    pl_buf glbuf = stream_reserve(p, &p->gather_stream,
+                                  (size_t) nglyph * 8 * sizeof(float), 16, &gloff);
+    if (!glbuf)
+        p->cnt_gather_ubo++;
+    int base = gloff / 16;   // in vec4 units
     struct pl_var glvar = pl_var_vec4("gl");
-    glvar.dim_a = 2 * GATHER_MAXG;
+    glvar.dim_a = glbuf ? GATHER_SLOT_VEC4 : 2 * GATHER_MAXG;
+    struct pl_buffer_var glbv = { .var = glvar, .layout = pl_std430_layout(0, &glvar) };
+    struct pl_shader_desc descs4[] = {
+        descs[0], descs[1], descs[2],
+        { .desc = { .name="glbuf", .type=PL_DESC_BUF_STORAGE, .binding=3,
+                    .access=PL_DESC_ACCESS_READONLY },
+          .binding = { .object=glbuf }, .buffer_vars = &glbv, .num_buffer_vars = 1 },
+    };
     struct pl_shader_var vars[] = {
         { .var = pl_var_int("bw"), .data=&bw }, { .var = pl_var_int("bh"), .data=&bh },
         { .var = pl_var_int("nglyph"), .data=&nglyph },
         { .var = glvar, .data = gl },
     };
+    if (glbuf) {
+        memcpy((float *) glbuf->data + 4 * (size_t) base, gl,
+               (size_t) nglyph * 8 * sizeof(float));
+        vars[3] = (struct pl_shader_var) { .var = pl_var_int("base"), .data=&base };
+    }
     struct pl_custom_shader cs = {
         .compute = true, .compute_group_size = {16, 16},
-        .descriptors = descs, .num_descriptors = 3,
-        .variables = vars, .num_variables = 4, .body = osd_combine_gather_body,
+        .descriptors = glbuf ? descs4 : descs, .num_descriptors = glbuf ? 4 : 3,
+        .variables = vars, .num_variables = 4,
+        .body = glbuf ? osd_combine_gather_ssbo_body : osd_combine_gather_body,
     };
     if (pl_shader_custom(sh, &cs))
         pl_dispatch_compute(p->osd_dp, pl_dispatch_compute_params(
@@ -3332,14 +3483,21 @@ static void gc_prealloc_pools(struct priv *p)
         // the pool byte size so the wall-entry `.ptr` upload finds a buffer
         // ready instead of allocating a driver slab (the :3232 staging class).
         // Monotonic (only grows); re-floored on every reconfig like the pools.
+        // These full-size buffers only take the uploads too big for a
+        // raster_stream slot (the wall-entry frame); see gc_staged_tex_upload.
         size_t esz = (size_t) EDGE_TEX_W * p->edge_tex->params.h * 4 * sizeof(float);
         size_t wsz = (size_t) WORK_TEX_W * p->work_tex->params.h * 4 * sizeof(float);
-        if (!p->edge_stage || p->edge_stage->params.size < esz)
-            pl_buf_recreate(gpu, &p->edge_stage,
-                            pl_buf_params(.size = esz, .host_writable = true));
-        if (!p->work_stage || p->work_stage->params.size < wsz)
-            pl_buf_recreate(gpu, &p->work_stage,
-                            pl_buf_params(.size = wsz, .host_writable = true));
+        for (int i = 0; i < RASTER_STAGE_RING; i++) {
+            if (!p->edge_stage[i] || p->edge_stage[i]->params.size < esz)
+                pl_buf_recreate(gpu, &p->edge_stage[i],
+                                pl_buf_params(.size = esz, .host_writable = true));
+            if (!p->work_stage[i] || p->work_stage[i]->params.size < wsz)
+                pl_buf_recreate(gpu, &p->work_stage[i],
+                                pl_buf_params(.size = wsz, .host_writable = true));
+        }
+        size_t ssz = MPMAX(esz, wsz) / RASTER_STAGE_EXTRA_DIV;
+        stream_ring_prealloc(p, &p->raster_stream,
+                             MPMAX(MP_ALIGN_UP(ssz, (size_t) 4 << 20), (size_t) 4 << 20), false, 3);
     }
 #endif
 }
@@ -3427,6 +3585,8 @@ static void gc_warmup(struct priv *p)
         // WP-H5b: precompile the batched gather-combine variant (one dummy glyph).
         if (p->glyph_atlas) {
             float gl[8 * GATHER_MAXG] = {0};
+            stream_ring_prealloc(p, &p->gather_stream,
+                                 (size_t) GATHER_SLOT_VEC4 * 4 * sizeof(float), true, 3);
             osd_combine_gather(p, p->run_acc, gl, 1, D, D, NULL);       (*n)++;
         }
     }
@@ -3642,10 +3802,15 @@ static int gc_work_cap_tiles(struct priv *p)
 // (slow!)") -- round-7 measured two such slabs (~110 MB edge + ~33 MB work-
 // list) INSIDE the ep09 wall-entry builds, the vo_gpu_next.c:3232 staging class
 // the WP-H12 prealloc policy did not cover (9-10 drops at the linear entry).
-// The staging buffer is preallocated to the pool's worst-frame byte size at
-// warm-up (gc_prealloc_pools) and reused; a real over-floor frame still grows
-// it once (counted as staging-grow), never a per-call slab.
-static bool gc_staged_tex_upload(struct priv *p, pl_buf *stage, pl_tex tex,
+// The staging buffers are preallocated at warm-up (gc_prealloc_pools) and
+// reused; a real over-floor frame still grows one once (counted as
+// staging-grow), never a per-call slab.
+//
+// Uploads go through p->raster_stream (see STREAM_RING_MAX), which never waits
+// on the GPU. Only an upload larger than a stream slot, or one made while every
+// slot is busy, uses `ring` -- a pl_buf_write into a buffer the GPU may still be
+// reading, which waits for it (counted as staging-wrap when it is busy).
+static bool gc_staged_tex_upload(struct priv *p, pl_buf *ring, pl_tex tex,
                                  int x1, int y1, size_t row_pitch,
                                  const void *src)
 {
@@ -3653,6 +3818,36 @@ static bool gc_staged_tex_upload(struct priv *p, pl_buf *stage, pl_tex tex,
     struct pl_tex_transfer_params tp = {
         .tex = tex, .rc = { .x1 = x1, .y1 = y1 }, .row_pitch = row_pitch,
     };
+    if (p->gpu->limits.buf_transfer) {
+        size_t off;
+        pl_buf sbuf = stream_reserve(p, &p->raster_stream, bytes, 256, &off);
+        if (sbuf) {
+            memcpy((uint8_t *) sbuf->data + off, src, bytes);
+            tp.buf = sbuf;
+            tp.buf_offset = off;
+            return pl_tex_upload(p->gpu, &tp);
+        }
+    }
+    pl_buf *stage = &ring[0];
+    if (p->gpu->limits.buf_transfer) {
+        pl_buf *busy_fit = NULL;
+        bool found = false;
+        for (int i = 0; i < RASTER_STAGE_RING; i++) {
+            if (!ring[i] || ring[i]->params.size < bytes)
+                continue;
+            if (!pl_buf_poll(p->gpu, ring[i], 0)) {
+                stage = &ring[i];
+                found = true;
+                break;
+            }
+            if (!busy_fit)
+                busy_fit = &ring[i];
+        }
+        if (!found && busy_fit) {
+            stage = busy_fit;
+            p->cnt_staging_wrap++;
+        }
+    }
     if (p->gpu->limits.buf_transfer &&
         (!(*stage) || (*stage)->params.size < bytes)) {
         size_t want = (bytes + (4u << 20) - 1) & ~(size_t)((4u << 20) - 1);
@@ -3689,7 +3884,7 @@ static bool gc_flush_edges_range(struct priv *p, int seg0, int seg1)
     if (!ef || !gc_ensure_pool(p, &p->edge_tex, ef, EDGE_TEX_W, eh, false, true,
                                false, false, true, "edge_tex"))
         return false;
-    gc_staged_tex_upload(p, &p->edge_stage, p->edge_tex, EDGE_TEX_W, eh,
+    gc_staged_tex_upload(p, p->edge_stage, p->edge_tex, EDGE_TEX_W, eh,
                          (size_t) EDGE_TEX_W * 4 * sizeof(float),
                          p->ebuf + (size_t) seg0 * SEG_EXPORT_W);
     return true;
@@ -3777,7 +3972,7 @@ static void gc_flush_raster(struct priv *p, struct rjob *rjobs, int nrjobs,
         if (gc_ensure_pool(p, &p->work_tex, pl_find_named_fmt(gpu, "rgba32f"),
                            WORK_TEX_W, wh, false, true, false, false, true,
                            "work_tex")) {
-            gc_staged_tex_upload(p, &p->work_stage, p->work_tex, WORK_TEX_W, wh,
+            gc_staged_tex_upload(p, p->work_stage, p->work_tex, WORK_TEX_W, wh,
                                  (size_t) WORK_TEX_W * 4 * sizeof(float), p->wbuf);
             gc_raster_batch(p, ntiles, dst);
             p->cnt_raster_dispatches++;
@@ -3892,18 +4087,22 @@ static void gc_flush_misses(struct priv *p, struct gmiss *miss, int nmiss,
 // (parts were split in emission order, so the two-overlay sequence preserves
 // libass's z-order exactly). Shared by the compose tail and the per-item
 // reuse fast path.
+static struct pl_color_space libass_overlay_color(struct priv *p,
+                                                  const struct sub_bitmaps *item,
+                                                  const struct mp_image *src,
+                                                  float ref_luma);
+
 static void emit_composed_overlays(struct priv *p, const struct sub_bitmaps *item,
                                    struct osd_entry *entry, struct pl_frame *frame,
                                    struct osd_state *state,
                                    enum pl_overlay_coords coords,
-                                   struct mp_image *src)
+                                   struct mp_image *src, float ref_luma)
 {
     struct pl_overlay col = {
         .mode = PL_OVERLAY_MONOCHROME, .coords = coords,
-        .color = pl_color_space_srgb, .repr.alpha = PL_ALPHA_INDEPENDENT,
+        .color = libass_overlay_color(p, item, src, ref_luma),
+        .repr.alpha = PL_ALPHA_INDEPENDENT,
     };
-    if (src && item->video_color_space && !pl_color_space_is_hdr(&src->params.color))
-        col.color = src->params.color;
     // WP-H12: an all-spill compose has no result_tex content at all -- skip
     // the empty main overlay (its parts all live in the spill overlays).
     if (entry->num_run_parts) {
@@ -4038,7 +4237,7 @@ static bool gc_cov_same(const struct sub_bitmaps *item,
 static bool compose_glyph_runs(struct priv *p, const struct sub_bitmaps *item,
                                struct osd_entry *entry, struct pl_frame *frame,
                                struct osd_state *state, enum pl_overlay_coords coords,
-                               struct mp_image *src, double gs,
+                               struct mp_image *src, float ref_luma, double gs,
                                struct mp_osd_res res)
 {
     // WP-H6 (item 6): any (re)build invalidates the reusable compose until it
@@ -5042,7 +5241,7 @@ restart_alloc:
     }
     talloc_free(tmp);
 
-    emit_composed_overlays(p, item, entry, frame, state, coords, src);
+    emit_composed_overlays(p, item, entry, frame, state, coords, src, ref_luma);
 
     CP_MARK(CP_EMIT);
 
@@ -5827,7 +6026,7 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
                             p->trs[item->render_index].valid) ? 1 : 0);
             }
             if (reuse) {
-                emit_composed_overlays(p, item, entry, frame, state, coords, src);
+                emit_composed_overlays(p, item, entry, frame, state, coords, src, ref_luma);
                 p->cnt_compose_reuse++;
                 if (item->format == SUBBITMAP_LIBASS_OUTLINES)
                     continue;
@@ -5850,7 +6049,7 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
             double gs = item->render_w > 0 && subs->w > 0
                       ? (double) item->render_w / subs->w : 1.0;
             stats_time_start(p->stats, "sub-composite");
-            bool done = compose_glyph_runs(p, item, entry, frame, state, coords, src, gs, res);
+            bool done = compose_glyph_runs(p, item, entry, frame, state, coords, src, ref_luma, gs, res);
             stats_time_end(p->stats, "sub-composite");
             if (!done)
                 goto bail;
@@ -5864,7 +6063,7 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
             double gs = item->render_w > 0 && subs->w > 0
                       ? (double) item->render_w / subs->w : 1.0;
             stats_time_start(p->stats, "sub-composite");   // WP-A3: GPU per-glyph composite
-            bool done = compose_glyph_runs(p, item, entry, frame, state, coords, src, gs, res);
+            bool done = compose_glyph_runs(p, item, entry, frame, state, coords, src, ref_luma, gs, res);
             stats_time_end(p->stats, "sub-composite");
             if (!done)
                 goto bail;
@@ -5902,13 +6101,22 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
         int prev_h = entry->tex ? entry->tex->params.h : -1;
         int new_w = MPMAX(want_w, entry->tex ? entry->tex->params.w : 0);
         int new_h = MPMAX(want_h, entry->tex ? entry->tex->params.h : 0);
-        bool ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
-            .format = tex_fmt,
-            .w = new_w,
-            .h = new_h,
-            .host_writable = true,
-            .sampleable = true,
-        });
+        // pl_tex_recreate() invalidates the texture even when it keeps it, so
+        // only call it when the size or format has to change; the change_id
+        // cache below relies on the contents surviving.
+        bool ok = true;
+        if (!entry->tex || new_w != prev_w || new_h != prev_h ||
+            entry->tex->params.format != tex_fmt)
+        {
+            entry->change_id = 0;
+            ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
+                .format = tex_fmt,
+                .w = new_w,
+                .h = new_h,
+                .host_writable = true,
+                .sampleable = true,
+            });
+        }
         if (!ok) {
             MP_ERR(vo, "Failed recreating OSD texture!\n");
             break;
@@ -5917,6 +6125,10 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
         // so this fires on first alloc and on each grow, not every frame.
         if (new_w != prev_w || new_h != prev_h)
             vo_alloc_bump(p, &p->cnt_tex_realloc);
+        // Unchanged since the last upload into this texture: skip it (the
+        // OSD would otherwise be re-uploaded on every redraw).
+        if (entry->change_id == item->change_id)
+            goto uploaded;
         stats_time_start(p->stats, "sub-upload");   // WP-A3: overlay atlas upload
         struct pl_tex_transfer_params upload_params = {
             .tex        = entry->tex,
@@ -5958,8 +6170,11 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
         if (!ok) {
             MP_ERR(vo, "Failed uploading OSD texture!\n");
             talloc_free(upload_params.priv);
+            entry->change_id = 0;
             break;
         }
+        entry->change_id = item->change_id;
+    uploaded:;
 
         // WP-E3 checkpoint: the atlas upload is recorded (async, targets only
         // this build buffer's entry->tex); the parts build below is next.
@@ -6159,7 +6374,9 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
                     .repr = { .sys = PL_COLOR_SYSTEM_RGB,
                               .levels = PL_COLOR_LEVELS_FULL,
                               .alpha = PL_ALPHA_PREMULTIPLIED },
-                    .color = pl_color_space_srgb,
+                    // Compose in the subtitle's own color space; preserve its
+                    // luminance metadata for the final HDR/output conversion.
+                    .color = ol->color,
                     .crop = { 0, 0, rw, rh },
                     .overlays = &inter_ol,
                     .num_overlays = 1,
@@ -6186,7 +6403,6 @@ static bool update_overlays(struct vo *vo, struct mp_osd_res res,
                 ol->num_parts = 1;
                 ol->mode = PL_OVERLAY_NORMAL;
                 ol->repr.alpha = PL_ALPHA_PREMULTIPLIED;
-                ol->color = pl_color_space_srgb;
             }
         }
 
@@ -6255,11 +6471,11 @@ bail:
     //
     // WP-H6 (item 4): serving is per ITEM now. SUB overlays are always served
     // from a valid snapshot (subs at most one frame stale -- the historical
-    // guard contract). A non-sub (OSD/external) overlay is served only when
-    // its item is present in THIS frame's render with the SAME change_id: a
-    // churning stats page/OSC goes blank for the one bailed frame instead of
-    // invalidating the subs, and a stale OSD state is never presented over a
-    // newer one.
+    // guard contract). Text/script OSD also keeps its previous visible image
+    // across a refresh: dropping it on a changed change_id makes stats/OSC
+    // flicker under deadline pressure. The next build must complete, so the
+    // old image cannot be retained indefinitely. An absent item is still
+    // removed immediately; other overlay types require unchanged data.
     p->guard_fired = true;
     g->must_complete = true;
     frame->num_overlays = 0;
@@ -6277,16 +6493,17 @@ bail:
                 int ri = g->good_ol_rindex[i];
                 bool is_sub = ri == 0 || ri == 1;   // OSDTYPE_SUB / OSDTYPE_SUB2
                 if (!is_sub) {
-                    bool unchanged = false;
+                    bool reusable = false;
                     for (int k = 0; k < subs->num_items; k++) {
                         if (subs->items[k]->render_index == ri) {
-                            unchanged = subs->items[k]->change_id ==
-                                        g->good_ol_change[i];
+                            reusable = ri == OSDTYPE_OSD || ri == OSDTYPE_EXTERNAL ||
+                                       subs->items[k]->change_id ==
+                                           g->good_ol_change[i];
                             break;
                         }
                     }
-                    if (!unchanged)
-                        continue;   // item changed/vanished: empty this frame
+                    if (!reusable)
+                        continue;   // removed item or changed non-text overlay
                 } else {
                     served_subs++;
                 }
@@ -7150,6 +7367,13 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         params.distort_params = NULL;
     }
 
+    // Frames up to last_id were pushed before the seek. Redraws of them keep
+    // the queue as it is, the reset happens with the first new frame.
+    if (p->want_seek_reset && frame->num_frames && frame->frame_id > p->last_id) {
+        p->want_seek_reset = false;
+        p->want_reset = true;
+    }
+
     // pl_queue advances its internal virtual PTS and culls available frames
     // based on this value and the VPS/FPS ratio. Requesting a non-monotonic PTS
     // is an invalid use of pl_queue. Reset it if this happens in an attempt to
@@ -7160,7 +7384,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     // already requested. Clamp the check to 0, as we don't have the previous
     // frame in vo_frame anyway.
     struct pl_source_frame vpts;
-    if (frame->current && !p->want_reset) {
+    if (frame->current && !p->want_reset && !p->want_seek_reset) {
         if (pl_queue_peek(p->queue, 0, &vpts) &&
             frame->current->pts + MPMAX(0, pts_offset) < vpts.pts)
         {
@@ -7286,6 +7510,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // sets target_trc to PQ, but the hint(source) is SDR, we want to fill
         // in SDR luminance values instead of the default PQ range.
         struct pl_color_space source_csp = *source;
+        bool min_luma_known = hint.hdr.min_luma > 0;
         pl_color_space_infer_map(&source_csp, &hint);
         // Always prefer target luminance and transfer for inverse tone mapping
         if (pl_color_transfer_is_hdr(target->transfer) && opts->tone_map.inverse) {
@@ -7305,6 +7530,11 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             hint.hdr.max_luma = opts->target_peak;
         if (target_ref_luma && use_ref_luma(&hint, &target_csp))
             hint.hdr.max_luma = target_ref_luma;
+        // The SDR black point was inferred from the peak known before the
+        // overrides above, keep the assumed contrast relative to the final
+        // peak instead of the one it was inferred from.
+        if (!min_luma_known && !pl_color_transfer_is_hdr(hint.transfer))
+            hint.hdr.min_luma = hint.hdr.max_luma / PL_COLOR_SDR_CONTRAST;
         // Always set maxCLL, display uses this metadata and we shouldn't let it
         // fallback to default value.
         if (!hint.hdr.max_cll)
@@ -7647,6 +7877,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     emit_counter(vo, "trans-share",               p->cnt_trans_share,         &p->stat_trans_share);
     emit_counter(vo, "compose-reuse",             p->cnt_compose_reuse,       &p->stat_compose_reuse);
     emit_counter(vo, "staging-wrap",              p->cnt_staging_wrap,        &p->stat_staging_wrap);
+    emit_counter(vo, "gather-ubo",                p->cnt_gather_ubo,          &p->stat_gather_ubo);
+    emit_counter(vo, "stream-full",               p->cnt_stream_full,         &p->stat_stream_full);
     if (want_slow) {
         int64_t gpu_ns = 0;
         for (int i = 0; i < p->perf_fresh.count; i++)
@@ -8305,7 +8537,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
 
     case VOCTRL_RESET:
         // Defer until the first new frame (unique ID) actually arrives
-        p->want_reset = true;
+        p->want_seek_reset = true;
         // WP-E3: VOCTRL_RESET is the canonical playback-discontinuity signal
         // to a VO -- vo.c delivers it on the VO thread on every seek/playback
         // restart, before the first post-seek draw_frame. Invalidating here
@@ -8314,6 +8546,9 @@ static int control(struct vo *vo, uint32_t request, void *data)
         // path is only a backstop behind this). The blend-subs snapshots
         // (frame_priv) need no invalidation: they die with their frames when
         // the queue is reset, and each is only ever served for its own frame.
+        // The overlay invalidation stays immediate even though the pl_queue
+        // reset above is deferred: redraws of pre-seek frames must not reuse
+        // a pre-seek overlay snapshot either.
         guard_invalidate(p);
         // WP-H10: arm the post-seek transient-demand probe (a few frames of
         // peeking the ring's pre-warmed seek target; see tr_reset_probe_run).
@@ -8600,8 +8835,12 @@ static void uninit(struct vo *vo)
     p->n_trans_chain = 0;
     pl_tex_destroy(p->gpu, &p->edge_tex);
     pl_tex_destroy(p->gpu, &p->work_tex);
-    pl_buf_destroy(p->gpu, &p->edge_stage);   // WP-H14 (c1)
-    pl_buf_destroy(p->gpu, &p->work_stage);   // WP-H14 (c1)
+    for (int i = 0; i < RASTER_STAGE_RING; i++) {   // WP-H14 (c1)
+        pl_buf_destroy(p->gpu, &p->edge_stage[i]);
+        pl_buf_destroy(p->gpu, &p->work_stage[i]);
+    }
+    stream_ring_destroy(p, &p->gather_stream);
+    stream_ring_destroy(p, &p->raster_stream);
     for (int i = 0; i < 3; i++)
         pl_buf_destroy(p->gpu, &p->glyph_stage[i]);
     for (int i = 0; i < NUM_OVERLAY_BUFS; i++)
@@ -9175,6 +9414,13 @@ AV_NOWARN_DEPRECATED(
 
     MP_DBG(p, "Render options updated, flushing renderer cache.\n");
     p->flush_cache = p->paused || !p->next_opts->inter_preserve;
+
+    // These options are baked into mapped frames. Reset the queue to map the
+    // queued frames again.
+    p->want_reset = p->want_reset || p->last_ref_white != opts->hdr_reference_white;
+    p->want_reset = p->want_reset || ((p->last_srgb_power22 ^ opts->treat_srgb_as_power22) & 1);
+    p->last_ref_white = opts->hdr_reference_white;
+    p->last_srgb_power22 = opts->treat_srgb_as_power22;
 }
 
 const struct vo_driver video_out_gpu_next = {

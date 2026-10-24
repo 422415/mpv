@@ -19,6 +19,8 @@ typedef struct mp_vo_opts {
     bool title_bar;
     bool all_workspaces;
     bool window_minimized;
+    int display_rate_match;
+    double display_rate_match_delay;
     bool window_maximized;
     int focus_on;
 
@@ -171,7 +173,11 @@ struct mp_osd_render_opts {
 
 struct mp_bluray_opts {
     char *bluray_device;
+    char *keyfile;
     int angle;
+    int min_title_length;
+    int region;
+    int uo_restriction;
 };
 
 struct dvda_opts {

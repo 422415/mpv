@@ -23,7 +23,7 @@ export PATH="/usr/local/cuda-13.2/bin:$PATH"
 mkdir -p "$DEPS" "$PREFIX" "$OUT"
 
 WAYLAND_TAG=1.23.1; WAYLAND_PROTOCOLS_TAG=1.41
-FFNVCODEC_TAG=n13.0.19.0; FFMPEG_TAG=n7.1; SHADERC_TAG=v2024.0
+FFNVCODEC_TAG=n13.0.19.0; FFMPEG_TAG=n9.0.2; SHADERC_TAG=v2024.0
 VULKAN_TAG=vulkan-sdk-1.3.296.0  # jammy ships 1.3.204; mpv needs vulkan >= 1.3.238
 say(){ echo -e "\n========== $* =========="; }
 clone(){ [ -d "$2" ] || git clone --depth 1 -b "$3" "$1" "$2"; }
@@ -72,6 +72,12 @@ cmake --build "$DEPS/shaderc/b" -j"$JOBS"; cmake --install "$DEPS/shaderc/b"
 say "libplacebo"
 clone https://code.videolan.org/videolan/libplacebo.git "$DEPS/libplacebo" v7.360.1
 git -C "$DEPS/libplacebo" submodule update --init --recursive
+# Present on graphics queue 0 so presents stay ordered while rendering keeps
+# rotating across --vulkan-queue-count queues (same fix as the Windows build's
+# libplacebo-present-queue.patch, for v7.360.1's pool->idx_queues layout).
+# Idempotent; the grep fails the build if a libplacebo bump moves the line.
+sed -i 's/^\(    int qidx = \)pool->idx_queues;$/\10;/' "$DEPS/libplacebo/src/vulkan/swapchain.c"
+grep -q '^    int qidx = 0;$' "$DEPS/libplacebo/src/vulkan/swapchain.c"
 meson setup "$DEPS/libplacebo/b" "$DEPS/libplacebo" --prefix="$PREFIX" --buildtype=release \
   -Dlibdovi=disabled -Ddemos=false -Dtests=false 2>/dev/null || true
 ninja -C "$DEPS/libplacebo/b" install

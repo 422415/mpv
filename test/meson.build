@@ -73,6 +73,10 @@ img_utils = static_library('img-utils', 'img_utils.c', include_directories: incd
                            dependencies: [libavcodec, libplacebo], objects: img_utils_objects)
 
 # The actual tests.
+display_rate = executable('display-rate', 'display_rate.c',
+                          include_directories: incdir, dependencies: libm)
+test('display-rate', display_rate)
+
 chmap_files = [
     'audio/chmap_avchannel.c',
     'audio/chmap_sel.c',
@@ -82,6 +86,22 @@ chmap = executable('chmap', 'chmap.c', include_directories: incdir,
                    dependencies: [libavutil], objects: chmap_objects,
                    link_with: test_utils)
 test('chmap', chmap)
+
+swresample_files = [
+    'audio/aframe.c',
+    'audio/chmap_avchannel.c',
+    'audio/fmt-conversion.c',
+    'demux/packet.c',
+    'demux/packet_pool.c',
+    'filters/f_swresample.c',
+    'filters/filter.c',
+    'filters/frame.c',
+]
+swresample_objects = libmpv.extract_objects(swresample_files)
+swresample = executable('swresample', 'swresample.c', include_directories: incdir,
+                        dependencies: [libavcodec, libavutil, libswresample, libplacebo],
+                        objects: swresample_objects, link_with: [img_utils, test_utils])
+test('swresample', swresample)
 
 gl_video_objects = libmpv.extract_objects('video/out/gpu/ra.c',
                                           'video/out/gpu/utils.c')
@@ -153,6 +173,11 @@ if get_option('libmpv')
     exe = executable('libmpv-test-options', 'libmpv_test_options.c',
                      include_directories: incdir, dependencies: libmpv_dep)
     test('libmpv-test-options', exe, suite: 'libmpv')
+
+    exe = executable('libmpv-test-aes-ctr', 'libmpv_test_aes_ctr.c',
+                     include_directories: incdir,
+                     dependencies: [libmpv_dep, libavutil])
+    test('libmpv-test-aes-ctr', exe, suite: 'libmpv')
 
     # Old versions of ffmpeg are bugged when setting forced tracks and older
     # versions of meson don't support the custom version checking argument.

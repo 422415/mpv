@@ -182,7 +182,7 @@ static char *get_term_status_msg(struct MPContext *mpctx)
     struct MPOpts *opts = mpctx->opts;
 
     if (opts->status_msg)
-        return mp_property_expand_escaped_string(mpctx, opts->status_msg);
+        return mp_expand_term_status_msg(mpctx);
 
     char *line = NULL;
 
@@ -578,6 +578,14 @@ void update_osd_msg(struct MPContext *mpctx)
 
     if (!opts->video_osd)
         return;
+
+    // Derive this notice from the hold itself, instead of replacing a user's
+    // timed OSD message or changing their configured OSD alignment.
+    if (mpctx->display_rate_resume_time && opts->osd_level >= 1) {
+        osd_set_text(osd, OSD_ASS_0 "{\\an8}" OSD_ASS_1
+                     "Matching display refresh rate...");
+        return;
+    }
 
     int osd_level = opts->osd_level;
     if (mpctx->osd_show_pos)

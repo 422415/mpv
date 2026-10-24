@@ -233,6 +233,8 @@ static void uninit_demuxer(struct MPContext *mpctx)
 
     kill_demuxers_reentrant(mpctx, demuxers, num_demuxers);
     talloc_free(demuxers);
+
+    disc_nav_reset(mpctx);
 }
 
 #define APPEND(s, ...) mp_snprintf_cat(s, sizeof(s), __VA_ARGS__)
@@ -364,26 +366,36 @@ void update_demuxer_properties(struct MPContext *mpctx)
     }
     struct demuxer *tracks = mpctx->demuxer;
     if (tracks->events & DEMUX_EVENT_STREAMS) {
+        int num_old_tracks = mpctx->num_tracks;
         add_demuxer_tracks(mpctx, tracks);
-        print_track_list(mpctx, NULL);
         tracks->events &= ~DEMUX_EVENT_STREAMS;
 
         // Streams surfaced after play_current_file's selection phase (e.g.
         // disc-nav playlist hop, or lavf identifying a PES stream only once
         // its first packet arrives) wouldn't otherwise get auto-selected.
+        // Only such a stream may claim a free slot, one that disc navigation
+        // or a failed decoder emptied stays empty.
         if (mpctx->playback_initialized && mpctx->opts->stream_auto_sel) {
             for (int t = 0; t < STREAM_TYPE_COUNT; t++) {
                 for (int i = 0; i < num_ptracks[t]; i++) {
                     if (mpctx->current_track[i][t])
                         continue;
+                    // The output belongs to a complex filter.
+                    if ((t == STREAM_VIDEO && mpctx->vo_chain) ||
+                        (t == STREAM_AUDIO && mpctx->ao_chain))
+                        continue;
                     if (mpctx->opts->stream_id[i][t] == -2)
                         continue;
                     struct track *sel = select_default_track(mpctx, i, t);
-                    if (sel)
+                    bool is_new = false;
+                    for (int n = num_old_tracks; n < mpctx->num_tracks; n++)
+                        is_new |= mpctx->tracks[n] == sel;
+                    if (is_new)
                         mp_switch_track_n(mpctx, i, t, sel, 0);
                 }
             }
         }
+        print_track_list(mpctx, NULL);
     }
     if (events & DEMUX_EVENT_METADATA) {
         struct mp_tags *info =
@@ -1042,6 +1054,7 @@ int mp_add_external_file(struct MPContext *mpctx, char *filename,
         t->visual_impaired_track = flags & TRACK_VISUAL_IMPAIRED;
         t->forced_track = flags & TRACK_FORCED;
         t->default_track = flags & TRACK_DEFAULT;
+        t->commentary_track = flags & TRACK_COMMENTARY;
         // if we found video, and we are loading cover art, flag as such.
         t->attached_picture = t->type == STREAM_VIDEO && (flags & TRACK_ATTACHED_PICTURE);
         if (first_num < 0 && (filter == STREAM_TYPE_COUNT || sh->type == filter))
@@ -1281,6 +1294,9 @@ static MP_THREAD_VOID open_demux_thread(void *ctx)
     if (demux) {
         MP_VERBOSE(mpctx, "Opening done: %s\n", mpctx->open_url);
 
+        if (mpctx->open_probe_display_rate)
+            mp_probe_display_rates(demux, mpctx->open_url_flags);
+
         if (mpctx->open_for_prefetch && !demux->fully_read) {
             int num_streams = demux_get_num_stream(demux);
             for (int n = 0; n < num_streams; n++) {
@@ -1343,6 +1359,7 @@ static void start_open(struct MPContext *mpctx, char *url, int url_flags,
     mpctx->open_format = talloc_strdup(NULL, mpctx->opts->demuxer_name);
     mpctx->open_url_flags = url_flags;
     mpctx->open_for_prefetch = for_prefetch && mpctx->opts->demuxer_thread;
+    mpctx->open_probe_display_rate = mpctx->opts->vo->display_rate_match != 0;
     mpctx->demuxer_changed = false;
 
     if (mp_thread_create(&mpctx->open_thread, open_demux_thread, mpctx)) {
@@ -1811,6 +1828,7 @@ static void play_current_file(struct MPContext *mpctx)
     mpctx->filename = NULL;
     mpctx->shown_aframes = 0;
     mpctx->shown_vframes = 0;
+    mpctx->display_rate_initialized = false;
     mpctx->last_chapter_seek = -2;
     mpctx->last_chapter_flag = false;
     mpctx->last_chapter = -2;
@@ -2292,8 +2310,13 @@ void mp_play_files(struct MPContext *mpctx)
             new_entry = mpctx->playlist->current;
         }
 
-        if (!new_entry)
+        if (!new_entry) {
             mpctx->playlist->playlist_completed = true;
+            // An episode's EOF/decoder teardown is not the end of a playback
+            // session. Keep the matched mode while advancing to another file.
+            if (mpctx->video_out)
+                vo_control(mpctx->video_out, VOCTRL_RESTORE_DISPLAY_RATE, NULL);
+        }
 
         mpctx->playlist->current = new_entry;
         mpctx->playlist->current_was_replaced = false;

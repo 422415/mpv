@@ -41,6 +41,7 @@
 #include "filters/f_decoder_wrapper.h"
 #include "filters/f_enhancement_pair.h"
 #include "video/out/vo.h"
+#include "video/out/display_rate.h"
 
 #include "core.h"
 #include "command.h"
@@ -125,6 +126,17 @@ void reset_video_state(struct MPContext *mpctx)
     mpctx->display_sync_active = 0;
 
     mpctx->video_status = mpctx->vo_chain ? STATUS_SYNCING : STATUS_EOF;
+
+    if (mpctx->display_rate_pending) {
+        // A seek can leave the section whose mode change was announced.
+        // Re-evaluate the first frame at the destination before changing modes.
+        talloc_free(mpctx->display_rate_pending);
+        mpctx->display_rate_pending = NULL;
+        mpctx->display_rate_initialized = false;
+        mpctx->display_rate_resume_time = 0;
+        mpctx->osd_force_update = true;
+        update_internal_pause_state(mpctx);
+    }
 }
 
 void uninit_video_out(struct MPContext *mpctx)
@@ -162,6 +174,7 @@ static void vo_chain_uninit(struct vo_chain *vo_c)
 
 void uninit_video_chain(struct MPContext *mpctx)
 {
+    mpctx->display_rate_initialized = false;
     if (mpctx->vo_chain) {
         reset_video_state(mpctx);
         vo_chain_uninit(mpctx->vo_chain);
@@ -170,6 +183,16 @@ void uninit_video_chain(struct MPContext *mpctx)
         mpctx->video_status = STATUS_EOF;
 
         mp_notify(mpctx, MPV_EVENT_VIDEO_RECONFIG, NULL);
+    }
+    if (mpctx->display_rate_pending) {
+        talloc_free(mpctx->display_rate_pending);
+        mpctx->display_rate_pending = NULL;
+        mpctx->display_rate_initialized = false;
+    }
+    if (mpctx->display_rate_resume_time) {
+        mpctx->display_rate_resume_time = 0;
+        mpctx->osd_force_update = true;
+        update_internal_pause_state(mpctx);
     }
 }
 
@@ -227,6 +250,46 @@ static void filter_update_subtitles(void *ctx, double pts)
         update_subtitles(mpctx, pts);
 }
 
+// Create the track's decoder and connect it to the filter chain.
+static bool vo_chain_init_decoder(struct MPContext *mpctx, struct vo_chain *vo_c)
+{
+    struct track *track = vo_c->track;
+    if (!init_video_decoder(mpctx, track))
+        return false;
+    vo_c->dec_src = track->dec->f->pins[0];
+    vo_c->filter->container_fps =
+        mp_decoder_wrapper_get_container_fps(track->dec);
+    if (vo_c->is_coverart)
+        mp_decoder_wrapper_set_coverart_flag(track->dec, true);
+    mp_pin_connect(vo_c->filter->f->pins[0], vo_c->dec_src);
+    return true;
+}
+
+// Destroy the track's decoder, keeping the filter chain, the VO and the
+// displayed frame. The chain stays at EOF until reinit_video_decoder().
+void uninit_video_decoder(struct MPContext *mpctx)
+{
+    struct vo_chain *vo_c = mpctx->vo_chain;
+    struct track *track = vo_c->track;
+    mp_assert(track && track->dec);
+    talloc_free(track->dec->f);
+    track->dec = NULL;
+    vo_c->dec_src = NULL;
+}
+
+// Create a new decoder for the track and restart the chain with it.
+void reinit_video_decoder(struct MPContext *mpctx)
+{
+    struct vo_chain *vo_c = mpctx->vo_chain;
+    mp_assert(vo_c->track && !vo_c->track->dec);
+    // init_video_decoder() deselects the track and destroys the chain on failure.
+    if (!vo_chain_init_decoder(mpctx, vo_c))
+        return;
+    // The filter chain still holds the old decoder's EOF.
+    mp_filter_reset(vo_c->filter->f);
+    reset_video_state(mpctx);
+}
+
 // (track=NULL creates a blank chain, used for lavfi-complex)
 void reinit_video_chain_src(struct MPContext *mpctx, struct track *track)
 {
@@ -265,22 +328,10 @@ void reinit_video_chain_src(struct MPContext *mpctx, struct track *track)
     if (track) {
         vo_c->track = track;
         track->vo_c = vo_c;
-        if (!init_video_decoder(mpctx, track))
-            goto err_out;
-
-        vo_c->dec_src = track->dec->f->pins[0];
-        vo_c->filter->container_fps =
-            mp_decoder_wrapper_get_container_fps(track->dec);
         vo_c->is_coverart = !!track->attached_picture;
         vo_c->is_sparse = track->stream->still_image || vo_c->is_coverart;
-
-        if (vo_c->is_coverart)
-            mp_decoder_wrapper_set_coverart_flag(track->dec, true);
-
-        track->vo_c = vo_c;
-        vo_c->track = track;
-
-        mp_pin_connect(vo_c->filter->f->pins[0], vo_c->dec_src);
+        if (!vo_chain_init_decoder(mpctx, vo_c))
+            goto err_out;
     }
 
     update_vo_chain_el_pair(mpctx);
@@ -607,14 +658,25 @@ static void update_avsync_before_frame(struct MPContext *mpctx)
     struct MPOpts *opts = mpctx->opts;
     struct vo *vo = mpctx->video_out;
 
-    if (mpctx->video_status < STATUS_READY) {
+    // First frame after a reset while audio is already playing: the chain was
+    // started mid-playback (track switch, disc stream delivering again), or a
+    // sparse stream's frame was held through the restart. delay is zero from
+    // the reset and the frame would be shown right away. Set it to the audio
+    // written past the frame's pts, so the audio sync below shows the frame
+    // at its time like any later one.
+    bool first_frame = mpctx->video_pts == MP_NOPTS_VALUE;
+    if (first_frame && mpctx->audio_status == STATUS_PLAYING) {
+        double apts = written_audio_pts(mpctx);
+        double pts = mpctx->next_frames[0]->pts;
+        if (apts != MP_NOPTS_VALUE && pts != MP_NOPTS_VALUE)
+            mpctx->delay = apts + opts->audio_delay - pts;
+    }
+
+    if (mpctx->video_status < STATUS_READY && mpctx->audio_status != STATUS_PLAYING) {
         mpctx->time_frame = 0;
     } else if (mpctx->display_sync_active || vo->opts->video_sync == VS_NONE) {
         // don't touch the timing
-    } else if (mpctx->audio_status == STATUS_PLAYING &&
-               mpctx->video_status == STATUS_PLAYING &&
-               !ao_untimed(mpctx->ao))
-    {
+    } else if (mpctx->audio_status == STATUS_PLAYING && !ao_untimed(mpctx->ao)) {
         double buffered_audio = ao_get_delay(mpctx->ao);
 
         double predicted = mpctx->delay / mpctx->video_speed +
@@ -622,7 +684,7 @@ static void update_avsync_before_frame(struct MPContext *mpctx)
         double difference = buffered_audio - predicted;
         MP_STATS(mpctx, "value %f audio-diff", difference);
 
-        if (opts->autosync) {
+        if (opts->autosync && !first_frame) {
             /* Smooth reported playback position from AO by averaging
              * it with the value expected based on previous value and
              * time elapsed since then. May help smooth video timing
@@ -817,7 +879,7 @@ static void handle_display_sync_frame(struct MPContext *mpctx,
 
     mpctx->display_sync_active = false;
 
-    if (!VS_IS_DISP(mode) || !vo_is_visible(vo))
+    if (!VS_IS_DISP(mode) || !vo_is_visible(vo) || mpctx->vo_chain->is_sparse)
         return;
 
     bool resample = mode == VS_DISP_RESAMPLE || mode == VS_DISP_RESAMPLE_VDROP ||
@@ -1064,18 +1126,16 @@ void write_video(struct MPContext *mpctx)
     if (mpctx->paused && mpctx->video_status >= STATUS_READY)
         return;
 
+    // Once the chain reached EOF nothing is read from it again.
     bool logical_eof = false;
-    int r = video_output_image(mpctx, &logical_eof);
+    int r = VD_EOF;
+    if (mpctx->video_status < STATUS_DRAINING)
+        r = video_output_image(mpctx, &logical_eof);
     MP_TRACE(mpctx, "video_output_image: r=%d/eof=%d/st=%s\n", r, logical_eof,
              mp_status_str(mpctx->video_status));
 
     if (r < 0)
         goto error;
-
-    // A frame arriving while the restart is still in progress is the
-    // restart's first frame, even if the (sparse) stream was at EOF.
-    if (r == VD_NEW_FRAME && mpctx->video_status == STATUS_EOF && !mpctx->restart_complete)
-        mpctx->video_status = STATUS_SYNCING;
 
     if (r == VD_WAIT) {
         // Heuristic to detect underruns.
@@ -1141,9 +1201,6 @@ void write_video(struct MPContext *mpctx)
         }
         return;
     }
-
-    if (mpctx->video_status > STATUS_PLAYING)
-        mpctx->video_status = STATUS_PLAYING;
 
     if (r != VD_NEW_FRAME) {
         mp_wakeup_core(mpctx); // Decode more in next iteration.
@@ -1217,19 +1274,62 @@ void write_video(struct MPContext *mpctx)
         mp_mutex_unlock(&vo->params_mutex);
     }
 
+    // Irregular VFR keeps one whole-file choice. Files consisting entirely of
+    // long CFR sections may match each section, including when seeking into it.
+    struct sh_stream *sh = track ? track->stream : NULL;
+    int section = -1;
+    if (vo->opts->display_rate_match && sh) {
+        double pts = mpctx->next_frames[0]->pts;
+        if (pts != MP_NOPTS_VALUE && opts->rebase_start_time)
+            pts += track->demuxer->start_time;
+        section = mp_display_rate_section(sh->display_cadences,
+                                          sh->num_display_cadences, pts);
+    }
+    if (vo->opts->display_rate_match && !mpctx->paused && !vo_c->is_sparse &&
+        (!mpctx->display_rate_initialized || mpctx->display_rate_section != section) &&
+        mpctx->play_dir > 0 && !opts->untimed && !mpctx->encode_lavc_ctx &&
+        mpctx->next_frames[0]->pts != MP_NOPTS_VALUE)
+    {
+        mpctx->display_rate_initialized = true;
+        mpctx->display_rate_section = section;
+        struct mp_display_rate rate = {.variable = true, .scale = opts->playback_speed};
+        if (sh) {
+            // Preserve a filter's declared cadence multiplier, e.g. RIFE.
+            if (sh->codec->fps > 0 && vo_c->filter->container_fps > 0)
+                rate.scale *= vo_c->filter->container_fps / sh->codec->fps;
+            double fps = section >= 0 ? 1 / sh->display_cadences[section].interval
+                                      : sh->whole_file_fps;
+            rate.fps = fps * rate.scale;
+            rate.variable = !isfinite(rate.fps) || rate.fps <= 0;
+            rate.cadences = sh->display_cadences;
+            rate.num_cadences = sh->num_display_cadences;
+        }
+        MP_VERBOSE(mpctx, "Display refresh selection: %s, %.3f fps (section %d).\n",
+                   rate.variable ? "mixed/unknown" : "CFR", rate.fps, section);
+        if (vo_control(vo, VOCTRL_MATCH_DISPLAY_RATE, &rate) == VO_TRUE)
+        {
+            // Let the OSD render before the blocking Windows mode change.
+            // The playloop applies this request after the notice interval;
+            // both clocks remain held without changing the user's pause.
+            rate.apply = true;
+            mpctx->display_rate_pending = talloc_memdup(mpctx, &rate, sizeof(rate));
+            double preview = opts->video_osd && opts->osd_level >= 1 ? 0.5 : 0;
+            mpctx->display_rate_resume_time = mp_time_sec() + preview;
+            update_internal_pause_state(mpctx);
+            update_osd_msg(mpctx);
+            MP_VERBOSE(mpctx, "Pausing playback for display refresh change; "
+                       "notice interval %.3f seconds.\n", preview);
+            mp_set_timeout(mpctx, preview);
+            // Queue the first still frame so the matching message is visible
+            // while startup is held. Both clocks remain paused until the timer
+            // expires; an already-playing video keeps its current frame.
+            if (mpctx->video_status >= STATUS_READY)
+                return;
+        }
+    }
+
     mpctx->time_frame -= get_relative_time(mpctx);
     update_avsync_before_frame(mpctx);
-
-    // Schedule frames directly against the audio clock for sparse video.
-    if (vo_c->is_sparse && !mpctx->display_sync_active &&
-        mpctx->audio_status == STATUS_PLAYING &&
-        mpctx->video_status == STATUS_PLAYING)
-    {
-        double apts = playing_audio_pts(mpctx);
-        double fpts = mpctx->next_frames[0]->pts;
-        if (apts != MP_NOPTS_VALUE && fpts != MP_NOPTS_VALUE)
-            mpctx->time_frame = MPMAX(fpts - apts, 0) / mpctx->video_speed;
-    }
 
     // Enforce timing subtitles to video frames.
     osd_set_force_video_pts(mpctx->osd, MP_NOPTS_VALUE);

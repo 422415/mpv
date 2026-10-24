@@ -22,6 +22,7 @@
 #include <limits.h>
 
 #include <libavutil/common.h>
+#include <libavutil/buffer.h>
 #include <ass/ass.h>
 
 #include "mpv_talloc.h"
@@ -46,6 +47,8 @@
 struct sd_ass_priv {
     struct ass_library *ass_library;
     struct ass_renderer *ass_renderer;
+    AVBufferRef *ass_library_owner;
+    AVBufferRef *ass_renderer_owner;
     struct ass_track *ass_track;
     struct ass_track *shadow_track; // for --sub-ass=no rendering
     bool ass_configured;
@@ -69,7 +72,7 @@ struct sd_ass_priv {
 };
 
 struct seen_packet {
-    int64_t pos;
+    int64_t sig;
     double pts;
     int animated; // -1 is unknown
 };
@@ -234,6 +237,19 @@ static void filters_init(struct sd *sd)
     }
 }
 
+static void free_ass_library(void *opaque, uint8_t *data)
+{
+    ass_library_done((ASS_Library *)data);
+    talloc_free(opaque); // the library's callback log outlives the sd as well
+}
+
+static void free_ass_renderer(void *opaque, uint8_t *data)
+{
+    AVBufferRef *library_owner = opaque;
+    ass_renderer_done((ASS_Renderer *)data);
+    av_buffer_unref(&library_owner);
+}
+
 static void enable_output(struct sd *sd, bool enable)
 {
     struct sd_ass_priv *ctx = sd->priv;
@@ -248,10 +264,18 @@ static void enable_output(struct sd *sd, bool enable)
         if (ctx->packer)
             mp_sub_packer_release_ass_pins(ctx->packer);
 #endif
-        ass_renderer_done(ctx->ass_renderer);
+        av_buffer_unref(&ctx->ass_renderer_owner);
         ctx->ass_renderer = NULL;
     } else {
         ctx->ass_renderer = ass_renderer_init(ctx->ass_library);
+        MP_HANDLE_OOM(ctx->ass_renderer);
+        AVBufferRef *library_owner = av_buffer_ref(ctx->ass_library_owner);
+        MP_HANDLE_OOM(library_owner);
+        // Render-ahead frames may remain in use after an option change retires
+        // this renderer. Their pins retain this owner without copying outlines.
+        ctx->ass_renderer_owner = av_buffer_create((uint8_t *)ctx->ass_renderer,
+            0, free_ass_renderer, library_owner, 0);
+        MP_HANDLE_OOM(ctx->ass_renderer_owner);
 
         mp_ass_configure_fonts(ctx->ass_renderer, sd->opts->sub_style,
                                sd->global, sd->log);
@@ -264,7 +288,11 @@ static void assobjects_init(struct sd *sd)
     struct mp_subtitle_opts *opts = sd->opts;
     struct mp_subtitle_shared_opts *shared_opts = sd->shared_opts;
 
-    ctx->ass_library = mp_ass_init(sd->global, sd->opts->sub_style, sd->log);
+    struct mp_log *library_log = mp_log_new(NULL, sd->log, NULL);
+    ctx->ass_library = mp_ass_init(sd->global, sd->opts->sub_style, library_log);
+    ctx->ass_library_owner = av_buffer_create((uint8_t *)ctx->ass_library,
+        0, free_ass_library, library_log, 0);
+    MP_HANDLE_OOM(ctx->ass_library_owner);
     ass_set_extract_fonts(ctx->ass_library, opts->use_embedded_fonts);
 
     add_subtitle_fonts(sd);
@@ -325,7 +353,8 @@ static void assobjects_destroy(struct sd *sd)
     ass_free_track(ctx->ass_track);
     ass_free_track(ctx->shadow_track);
     enable_output(sd, false);
-    ass_library_done(ctx->ass_library);
+    av_buffer_unref(&ctx->ass_library_owner);
+    ctx->ass_library = NULL;
 }
 
 static int init(struct sd *sd)
@@ -415,6 +444,10 @@ static void filter_and_add(struct sd *sd, struct demux_packet *pkt)
     ass_process_chunk(ctx->ass_track, pkt->buffer, pkt->len,
                       floor(pkt->pts * 1000 + 1e-6),
                       floor(pkt->duration * 1000 + 1e-6));
+    if (pkt != orig_pkt)
+        talloc_free(pkt);
+    // the seen and animated state is kept on the original packet
+    pkt = orig_pkt;
 
     // This bookkeeping only has any practical use for ASS subs
     // over a VO with no video.
@@ -444,28 +477,37 @@ static void filter_and_add(struct sd *sd, struct demux_packet *pkt)
             }
         }
     }
+}
 
-    if (pkt != orig_pkt)
-        talloc_free(pkt);
+// 64-bit FNV-1a
+static inline uint64_t hash_data(const unsigned char *data, size_t len)
+{
+    uint64_t hash = 0xcbf29ce484222325; // offset basis
+    for (size_t n = 0; n < len; n++)
+        hash = (hash ^ data[n]) * 0x100000001b3; // FNV prime
+    return hash;
 }
 
 // Test if the packet with the given file position and pts was already consumed.
 // Return false if the packet is new (and add it to the internal list), and
-// return true if it was already seen.
+// return true if it was already seen. Packets without a file position are
+// identified by a hash of their contents instead.
 static bool check_packet_seen(struct sd *sd, struct demux_packet *packet)
 {
     struct sd_ass_priv *priv = sd->priv;
+    int64_t sig = packet->pos >= 0 ? packet->pos
+                                   : hash_data(packet->buffer, packet->len);
     int a = 0;
     int b = priv->num_seen_packets;
     while (a < b) {
         int mid = a + (b - a) / 2;
         struct seen_packet *seen_packet = &priv->seen_packets[mid];
-        if (packet->pos == seen_packet->pos && packet->pts == seen_packet->pts) {
+        if (sig == seen_packet->sig && packet->pts == seen_packet->pts) {
             packet->seen_pos = mid;
             return true;
         }
-        if (packet->pos > seen_packet->pos ||
-            (packet->pos == seen_packet->pos && packet->pts > seen_packet->pts)) {
+        if (sig > seen_packet->sig ||
+            (sig == seen_packet->sig && packet->pts > seen_packet->pts)) {
             a = mid + 1;
         } else {
             b = mid;
@@ -473,7 +515,7 @@ static bool check_packet_seen(struct sd *sd, struct demux_packet *packet)
     }
     packet->seen_pos = a;
     MP_TARRAY_INSERT_AT(priv, priv->seen_packets, priv->num_seen_packets, a,
-                        (struct seen_packet){packet->pos, packet->pts, -1});
+                        (struct seen_packet){sig, packet->pts, -1});
     return false;
 }
 
@@ -487,8 +529,7 @@ static void decode(struct sd *sd, struct demux_packet *packet)
     packet->sub_duration = packet->duration;
 
     if (ctx->converter) {
-        if (!sd->opts->sub_clear_on_seek && packet->pos >= 0 &&
-            check_packet_seen(sd, packet))
+        if (!sd->opts->sub_clear_on_seek && check_packet_seen(sd, packet))
             return;
 
         double sub_pts = 0;
@@ -889,6 +930,9 @@ static struct sub_bitmaps *get_bitmaps(struct sd *sd, struct mp_osd_res dim,
         sub_phase.assrender_ns += mp_time_ns() - t_ar;
 
     int64_t t_pk = sub_phase.on ? mp_time_ns() : 0;
+#if HAVE_ASS_OUTLINE_DEFERRED
+    mp_sub_packer_set_ass_renderer_owner(ctx->packer, ctx->ass_renderer_owner);
+#endif
     mp_sub_packer_pack_ass(ctx->packer, &imgs, 1, changed, !converted, format, res);
     if (sub_phase.on)
         sub_phase.pack_ns += mp_time_ns() - t_pk;

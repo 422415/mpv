@@ -11,6 +11,16 @@ Track Selection
     will be used. A track that matches more subtags will be preferred over one
     that matches fewer. See also ``--aid``.
 
+    On a disc the list is also handed to the disc's own selection logic. A DVD
+    register holds a single two-letter ISO 639-1 code, so only the first
+    two-letter entry is used and longer ones are skipped. Blu-ray takes one
+    three-letter code, picked by matching the whole list against the disc.
+    Either way this only affects what the disc itself picks, mpv's own track
+    selection always uses the whole list.
+
+    ``--slang`` additionally chooses the DVD menu language. Discs that carry
+    only one menu language ignore it.
+
     This is a string list option. See `List Options`_ for details.
 
     .. admonition:: Examples
@@ -1312,6 +1322,82 @@ Video
       properly. Some VOs will lazily initialize stuff when rendering the first
       frame, so if this is not done, there is some likeliness that the VO has
       to drop some frames if rendering the first frame takes longer than needed.
+
+``--display-rate-match=<no|yes|test>`` (Windows only)
+    Experimental automatic physical display refresh matching (default: ``no``).
+    Selects a refresh rate from measured video timestamps. CFR files and
+    irregular VFR files keep one rate for the whole file, including across
+    seeks and playback speed changes. Files consisting entirely of long CFR
+    sections can match each section instead.
+    For local Matroska/libavformat files, scans video packet timestamps without
+    decoding before playback. A complete scan can establish CFR; a short steady
+    opening cannot establish that the rest of a file is CFR. The scan stops
+    between packets after five seconds or one million packets. Network inputs
+    are not scanned. Unavailable timestamps and incomplete scans use the highest
+    supported refresh rate for the whole playback.
+    This does not change video timestamps, interpolate frames, or alter
+    ``--video-sync``.
+
+    Confirmed CFR files select the lowest supported progressive refresh rate
+    that is an exact multiple of their cadence, adjusted for initial playback
+    speed and a filter's declared cadence multiplier. If none exists, a near multiple
+    (within 0.2%) is preferred, for example 24 Hz for 23.976 fps when fractional
+    modes are unavailable. Exact multiples always take priority over near ones.
+    A near match retains a small timing difference; this option does not enable
+    playback speed correction.
+
+    If a complete scan finds multiple CFR sections, each at least 30 seconds
+    long, match the section about to play using the same CFR priority. For
+    example, a 29.97 fps opening followed by a 23.976 fps episode uses 60 Hz
+    then 23.976 Hz on a display offering 23.976/24/47.952/48/60 Hz. A seek or
+    saved resume position selects the destination section; seeking within the
+    same section does not trigger another change. Container FPS and VFR labels
+    do not override the measured cadence. If any run is shorter than 30 seconds,
+    keep one whole-file VFR choice instead of following local fluctuations.
+
+    For other completely scanned variable-rate files, retain the cadence runs and
+    their durations. Prefer the lowest exact common multiple, then a near
+    common multiple, of all the measured cadences. For example, mixed 23.976
+    and 29.97 fps sections prefer 119.88 Hz over 144 Hz when available. If no
+    common multiple exists, choose the mode with the lowest estimated squared
+    frame-hold timing error, weighted by each cadence's duration in the file.
+    Container timestamp rounding is accounted for. This can select a lower
+    refresh than the maximum, including on TVs limited to 60 Hz. It does not
+    guarantee perfect presentation of arbitrary VFR timestamps.
+
+    All choices preserve the current resolution, orientation and desktop bit
+    depth and use progressive modes. Fixed rates without an exact or near
+    match, and unverified files, retain the highest-supported-rate fallback.
+
+    Only the display containing the player is changed. Audio/video pause and a
+    notice appears at the top of the picture, with a half-second interval for it
+    to render before Windows applies the switch. This notice interval is skipped
+    if OSD is disabled. Audio/video then stay paused for
+    ``--display-rate-match-delay`` seconds after the switch succeeds, before
+    resuming automatically. The notice remains throughout both intervals. The
+    first frame can be displayed while startup is held. A manual pause
+    during this wait is preserved. No switching
+    occurs while minimized, paused, playing backward, or encoding. The matched
+    refresh is retained across consecutive playlist entries and file loops, so
+    episodes with matching cadence do not switch back to the desktop rate in
+    between. A different cadence can switch directly to its matching mode. The
+    original refresh is restored when the playlist finishes (including keeping
+    the last frame open), playback stops, video is disabled, the player exits
+    normally, or the option is disabled.
+    A subsequent external mode change is respected and stops automatic changes
+    for that playback. Forced process termination cannot guarantee restoration.
+
+    ``test`` logs decisions and asks Windows to validate the selected mode,
+    without applying it. It also operates in minimized windows for testing.
+
+``--display-rate-match-delay=<seconds>`` (Windows only)
+    Settling pause after a successful automatic display refresh switch (default:
+    3, range: 0 to 30). The delay starts when Windows finishes applying the mode.
+    A TV may need additional time to reacquire its signal; this is a timed wait,
+    not detection of when the panel shows a picture. Increase it for a slower TV.
+    Playback controls remain responsive, and a manual pause remains in effect
+    after the wait. Failed changes and test-mode decisions do not add a delay.
+    Setting 0 resumes as soon as the Windows call completes.
 
 ``--display-fps-override=<fps>``
     Set the display FPS used with the ``--video-sync=display-*`` modes. By
@@ -4136,8 +4222,17 @@ Disc Devices
 ``--disc-menu=<yes|no>``
     When set, opening ``dvd://`` or ``bd://`` boots into the disc's interactive
     menu instead of automatically playing the longest title (default: ``no``).
-    The menu can also be reached at any time via the synthetic "Disc Menu"
-    entry in the editions/titles list, or with ``discnav menu`` command.
+    On DVD the disc's virtual machine runs either way, so the menu can be
+    reached at any time via the synthetic "Disc Menu" entry in the
+    editions/titles list, or with the ``discnav menu`` command. A Blu-ray only
+    has disc navigation when playback started in menu mode, so neither is
+    available for a plain ``bd://``.
+
+    Blu-ray discs whose menus are BD-J rather than HDMV additionally need a
+    Java runtime and libbluray's BD-J jar (``libbluray-j2se-<version>.jar``).
+    libbluray should be able to find them automatically, but their locations
+    can also be overridden with the ``JAVA_HOME`` and ``LIBBLURAY_CP``
+    environment variables.
 
 ``--cdda-device=<path>``
     Specify the CD device for CDDA playback. The default device path depends on
@@ -4176,6 +4271,38 @@ Disc Devices
     .. admonition:: Example
 
         ``mpv bd:// --bluray-device=/path/to/bd/``
+
+``--bluray-region=<auto|a|b|c>``
+    Blu-ray player region code (default: auto). ``auto`` leaves libbluray's
+    own default in place, which is region B. Only matters for discs whose
+    menus or BD-J code check the player region.
+
+``--bluray-uo-restriction=<auto|disabled|relaxed|safe|compliant>``
+    How strictly to enforce the disc's User Operation prohibition masks
+    (default: auto, which leaves libbluray's default of ``relaxed`` in place).
+
+    Discs use these masks to make warnings and trailers unskippable.
+    ``disabled`` executes every operation unconditionally and may break
+    playback on some discs, ``compliant`` obeys the disc fully, and the two
+    values in between trade compliance for usability.
+
+``--bluray-min-title-length=<seconds>``
+    Ignore Blu-ray titles (playlists) shorter than this when building the
+    title list (default: 0, list every title). Discs commonly carry a large
+    number of very short playlists used only by the disc menus, and those show
+    up as editions. Setting this to something like 180 hides them.
+
+    If no title is long enough, the whole list is used instead, so that a disc
+    is never left unplayable by this.
+
+    Note that the title list is what ``bd://<N>`` and ``--edition`` index
+    into, so changing this renumbers them. ``bd://mpls/<NNNNN>`` is unaffected.
+    The language preferences are also picked from the titles that survive the
+    filter.
+
+``--bluray-key-file=<path>``
+    Path to a ``KEYDB.cfg`` unit key database, passed to libbluray for AACS
+    decryption (default: unset, let libaacs use its own configured location).
 
 ``--cdda-...``
     These options can be used to tune the CD Audio reading feature of mpv.
@@ -4219,6 +4346,11 @@ Disc Devices
     .. note::
 
         You need write access to the DVD device to change the speed.
+
+``--dvd-region=<auto|1-8>``
+    DVD player region code (default: auto). ``auto`` claims whichever regions
+    the disc itself allows, so region checks in the disc's own code pass.
+    Naming a region claims exactly that one.
 
 ``--dvd-angle=<ID>``
     Some DVDs contain scenes that can be viewed from multiple angles.
@@ -4750,6 +4882,11 @@ Input
 ``--input-builtin-drag-and-drop=<yes|no>``
     Enable the built-in drag-and-drop behavior (default: yes). Setting it to no
     disables the built-in drag-and-drop handling.
+
+    .. admonition:: Note (macOS)
+
+        This also affects the drag and drop behavior on the Dock Icon and
+        loading files from Finder, since both cases can't be distinguished.
 
 ``--input-cmdlist``
     Prints all commands that can be bound to keys.
@@ -7224,15 +7361,10 @@ them.
 
     Windows with ANGLE only.
 
-``--angle-renderer=<d3d9|d3d11|auto>``
-    Forces a specific renderer when using the ANGLE backend (default: auto). In
-    auto mode this will pick D3D11 for systems that support Direct3D 11 feature
-    level 9_3 or higher, and D3D9 otherwise. This option is mainly for
-    debugging purposes. Normally there is no reason to force a specific
-    renderer, though ``--angle-renderer=d3d9`` may give slightly better
-    performance on old hardware. Note that the D3D9 renderer only supports
-    OpenGL ES 2.0, so most extended OpenGL features will not work if this
-    renderer is selected (similar to ``--gpu-dumb-mode``).
+``--angle-renderer=<d3d11|auto>``
+    Forces a specific renderer when using the ANGLE backend (default: auto).
+    This option is mainly for debugging purposes. Normally there is no reason
+    to force a specific renderer.
 
     Windows with ANGLE only.
 
