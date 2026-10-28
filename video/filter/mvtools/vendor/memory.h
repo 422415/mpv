@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#ifdef _MSC_VER
+#ifdef _WIN32
 #include <malloc.h>
 #define VS_RESTRICT __restrict
 #define VSH_ALIGNED_MALLOC(p, size, align) (*(p) = _aligned_malloc(size, align))
