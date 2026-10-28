@@ -5,6 +5,7 @@
 #include "vendor/GroupOfPlanes.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -42,9 +43,27 @@ struct Super {
         pts = f.pts;
     }
 };
+struct Motion {
+    GroupOfPlanes gop{};
+    explicit Motion(const MVAnalysisData &a) {
+        gopInit(&gop, 8, 8, a.nLvCount, 1, a.nMotionFlags, 0, 0, 0,
+                a.nBlkX, a.nBlkY, a.xRatioUV, a.yRatioUV, 0, a.bitsPerSample);
+    }
+    ~Motion() { gopDeinit(&gop); }
+    void reset() {
+        // Analyse starts each pair with zero predictors. Reusing the previous
+        // pair's vectors would introduce temporal prediction and change cuts.
+        for (int i = 0; i < gop.nLevelCount; ++i) {
+            auto *plane = gop.planes[i];
+            std::memset(plane->vectors, 0, plane->nBlkCount * sizeof(VECTOR));
+        }
+    }
+};
 struct Detector {
     ajn_mvtools_frame shape{};
     std::unique_ptr<Super> previous, current;
+    std::unique_ptr<Motion> motion;
+    std::vector<uint8_t> vectors;
     MVAnalysisData analysis{};
     MVPlaneSet mode = YPLANE;
     bool matches(const ajn_mvtools_frame &f) const {
@@ -67,10 +86,15 @@ struct Detector {
         a.nHPadding = a.nVPadding = 16;
         a.xRatioUV = x; a.yRatioUV = y; a.bitsPerSample = f.bits;
         a.nMotionFlags = MOTION_IS_BACKWARD | (mode == YUVPLANES ? MOTION_USE_CHROMA_MOTION : 0);
+#ifdef AJN_MVTOOLS_SSE2
+        a.nMotionFlags |= MOTION_USE_SIMD;
+#endif
         while (((a.nBlkX * 8) >> a.nLvCount) / 8 > 0 &&
                ((a.nBlkY * 8) >> a.nLvCount) / 8 > 0) ++a.nLvCount;
         previous = std::make_unique<Super>(f, superLevels, mode);
         current = std::make_unique<Super>(f, superLevels, mode);
+        motion = std::make_unique<Motion>(a);
+        vectors.resize(gopGetArraySize(&motion->gop));
         shape = f;
     }
 };
@@ -84,14 +108,6 @@ bool valid(const ajn_mvtools_frame &f) {
         if (!f.planes[p] || f.strides[p] < (f.width >> (p ? f.sub_w : 0)) * ((f.bits + 7) / 8)) return false;
     return true;
 }
-struct Motion {
-    GroupOfPlanes gop{};
-    explicit Motion(const MVAnalysisData &a) {
-        gopInit(&gop, 8, 8, a.nLvCount, 1, a.nMotionFlags, 0, 0, 0,
-                a.nBlkX, a.nBlkY, a.xRatioUV, a.yRatioUV, 0, a.bitsPerSample);
-    }
-    ~Motion() { gopDeinit(&gop); }
-};
 }
 int ajn_mvtools_version(void) { return AJN_MVTOOLS_ABI; }
 void *ajn_mvtools_create(void) { return new (std::nothrow) Detector; }
@@ -113,15 +129,15 @@ int ajn_mvtools_analyze(void *context, const ajn_mvtools_frame *a,
         if (d.current->pts == a->pts) d.previous.swap(d.current);
         if (d.previous->pts != a->pts) d.previous->fill(*a, d.mode);
         d.current->fill(*b, d.mode);
-        Motion motion(d.analysis);
-        std::vector<uint8_t> vectors(gopGetArraySize(&motion.gop));
+        auto &motion = *d.motion;
+        motion.reset();
         auto scale = [bits = a->bits](int value) {
             return static_cast<int>(value * ((1 << bits) - 1) / 255.0 + 0.5);
         };
         // isb=True compares frame n with n+1. Preserve that direction.
         gopSearchMVs(&motion.gop, &d.previous->frames, &d.current->frames,
             SearchHex2, 2, 1, scale(1000), scale(1200), 50, 2, 1,
-            vectors.data(), 0, nullptr, 0, 50, 0, scale(10000), 24, 1, 0,
+            d.vectors.data(), 0, nullptr, 0, 50, 0, scale(10000), 24, 1, 0,
             SearchExhaustive);
         // scaleThSCD and fpobIsSceneChange, with their original integer rounding.
         int64_t sad = thscd1;

@@ -1,5 +1,8 @@
 // Focused regression checks for the legacy algorithm adapter.
 #include "ajn_mvtools.h"
+#include "vendor/SADFunctions.h"
+#include "vendor/Luma.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +10,42 @@
 
 static void require(bool value, const char *message) {
     if (!value) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
+}
+static void kernels_match() {
+    // Every block shape used by 8x8 analysis and its chroma planes. Source
+    // blocks are packed by Analyse; reference rows have their own stride.
+    for (int bits : {8, 16}) for (int width : {4, 8}) for (int height : {4, 8}) {
+        int bytes = bits / 8, pitch = (width + 5) * bytes;
+        std::vector<uint8_t> a(width * height * bytes), b(pitch * (height + 1));
+        auto scalar = selectSADFunction(width, height, bits, 0, 0);
+        auto simd = selectSADFunction(width, height, bits, 1, 0);
+#ifdef AJN_MVTOOLS_SSE2
+        require(simd != scalar, "SSE2 SAD dispatch must be active");
+#endif
+        for (int pattern = 0; pattern < 3; ++pattern) {
+            for (size_t i = 0; i < a.size(); ++i)
+                a[i] = pattern == 0 ? 0 : pattern == 1 ? 255 : static_cast<uint8_t>(i * 73 + 19);
+            for (size_t i = 0; i < b.size(); ++i)
+                b[i] = pattern == 0 ? 255 : pattern == 1 ? 0 : static_cast<uint8_t>(i * 37 + 29);
+            require(scalar(a.data(), width * bytes, b.data() + bytes, pitch) ==
+                    simd(a.data(), width * bytes, b.data() + bytes, pitch), "SSE2 SAD must equal scalar, including 16-bit extremes");
+            if (width == 8 && height == 8) {
+                auto luma = selectLumaFunction(width, height, bits, 0);
+                auto fastLuma = selectLumaFunction(width, height, bits, 1);
+                require(luma(b.data() + bytes, pitch) == fastLuma(b.data() + bytes, pitch), "SSE2 luma must equal scalar");
+            }
+        }
+    }
+}
+static void matches_fresh(void *reused, const ajn_mvtools_frame &a, const ajn_mvtools_frame &b) {
+    void *fresh = ajn_mvtools_create();
+    ajn_mvtools_result expected{}, actual{};
+    require(ajn_mvtools_analyze(fresh, &a, &b, 240, 130, &expected) == 0 &&
+            ajn_mvtools_analyze(reused, &a, &b, 240, 130, &actual) == 0, "fresh and reused analysis");
+    require(actual.cut == expected.cut && actual.changed_blocks == expected.changed_blocks &&
+            actual.total_blocks == expected.total_blocks && actual.block_count_threshold == expected.block_count_threshold &&
+            actual.block_sad_threshold == expected.block_sad_threshold, "reused motion workspace must not retain previous predictors");
+    ajn_mvtools_destroy(fresh);
 }
 struct Image {
     ajn_mvtools_frame f{};
@@ -28,6 +67,7 @@ struct Image {
     }
 };
 int main(int argc, char **argv) {
+    kernels_match();
     void *d = ajn_mvtools_create(); require(d, "create");
     ajn_mvtools_result r{};
     Image a(64, 64, 8, false, 0), b(64, 64, 8, false, 1);
@@ -57,7 +97,19 @@ int main(int argc, char **argv) {
     auto start = std::chrono::steady_clock::now();
     require(ajn_mvtools_analyze(d, &panA.f, &panB.f, 240, 130, &r) == 0 && !r.cut, "pan must remain continuous");
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-    std::printf("PASS legacy thresholds, chroma, depth, reset and pan; %dx%d first pair %.3f ms (%d/%d changed blocks)\n",
+    Image next(width, height, 8, true, 2);
+    next.fill(1, 128); next.fill(2, 128);
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
+        next.p[0][y * width + x] = panB.p[0][y * width + std::max(0, x - 4)];
+    matches_fresh(d, panB.f, next.f);
+    panA.f.pts = 3;
+    matches_fresh(d, next.f, panA.f);
+    // Reinitialization and seek reset must also preserve fresh-pair results.
+    matches_fresh(d, ca.f, cb.f);
+    ajn_mvtools_reset(d);
+    next.f.pts = 4;
+    matches_fresh(d, panA.f, next.f);
+    std::printf("PASS SIMD/scalar parity, workspace reuse, legacy thresholds, chroma, depth, reset and pan; %dx%d first pair %.3f ms (%d/%d changed blocks)\n",
                  width, height, ms, r.changed_blocks, r.total_blocks);
     ajn_mvtools_destroy(d);
 }

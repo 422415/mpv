@@ -12,9 +12,13 @@ strict greater-than comparisons. It consumes full-resolution planar YUV/gray.
 Local adaptations: the VapourSynth plugin interface is excluded; its allocation
 and row-copy helpers are supplied in `vendor/memory.h`; unused VS declarations
 were removed from `MVAnalysisData.h`. DCT is fixed to the legacy default of zero,
-so FFTW is not required. The initial build uses the original scalar paths rather
-than the optional architecture-specific assembly. No VapourSynth runtime is
-loaded or distributed. `detector.cpp` supplies the frame adapter and thresholds.
+so FFTW is not required. On x64, `AJN_MVTOOLS_SSE2` enables the original SSE2
+intrinsics for the detector's 8x8 SAD/luma and subsampled chroma SAD blocks.
+Other kernels retain their original C implementation; the plugin's assembly
+dispatch is not required. Motion-search allocations and vector output storage
+are reused, with predictors cleared for each pair to preserve fresh Analyse
+semantics. No VapourSynth runtime is loaded or distributed. `detector.cpp`
+supplies the frame adapter and thresholds.
 
 The source revision of the affected user's old libmvtools.dll is not yet known.
 Visual equivalence and real-time performance need qualification on their clips.

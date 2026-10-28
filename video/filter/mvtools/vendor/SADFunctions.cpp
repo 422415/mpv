@@ -28,7 +28,7 @@ enum InstructionSets {
 #endif
 
 
-#if defined(MVTOOLS_X86)
+#if defined(MVTOOLS_X86) || defined(AJN_MVTOOLS_SSE2)
 
 #include <emmintrin.h>
 
@@ -468,6 +468,23 @@ static const std::unordered_map<uint32_t, SADFunction> sad_functions = {
 
 SADFunction selectSADFunction(unsigned width, unsigned height, unsigned bits, int opt, unsigned cpu) {
     SADFunction sad = sad_functions.at(KEY(width, height, bits, Scalar));
+
+#if defined(AJN_MVTOOLS_SSE2)
+    // The standalone detector uses 8x8 blocks and optional 2:1 chroma
+    // subsampling. Reuse upstream's exact SSE2 sums without its unrelated
+    // assembly/SATD dispatch or a higher x64 CPU requirement.
+    if (opt) {
+#define AJN_SAD(w, h) \
+        if (width == w && height == h) \
+            return bits == 8 ? SADWrapperU8<w, h>::sad_u8_sse2 : \
+                               SADWrapperU16<w, h>::sad_u16_sse2;
+        AJN_SAD(8, 8)
+        AJN_SAD(8, 4)
+        AJN_SAD(4, 8)
+        AJN_SAD(4, 4)
+#undef AJN_SAD
+    }
+#endif
 
 #if defined(MVTOOLS_X86)
     if (opt) {
