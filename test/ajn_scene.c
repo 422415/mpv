@@ -118,6 +118,23 @@ int main(void)
     for (int y = 0; y < 64; y++) memset(b->planes[0] + y * b->stride[0], 16, 64);
     ajn_scene_reset(s);
     assert_int_equal(ajn_scene_decide(s, a, b, true), 0);
+    talloc_free(a); talloc_free(b);
+    a = mp_image_alloc(IMGFMT_NV12, 64, 64);
+    b = mp_image_alloc(IMGFMT_NV12, 64, 64);
+    mp_require(a && b);
+    a->pts = 1; b->pts = 2;
+    a->params.chroma_location = b->params.chroma_location = PL_CHROMA_LEFT;
+    for (int y = 0; y < 64; y++) {
+        memset(a->planes[0] + y * a->stride[0], 64, 64);
+        memset(b->planes[0] + y * b->stride[0], 64, 64);
+    }
+    for (int y = 0; y < 32; y++) {
+        memset(a->planes[1] + y * a->stride[1], 64, 64);
+        memset(b->planes[1] + y * b->stride[1], 192, 64);
+    }
+    ajn_scene_reset(s);
+    assert_int_equal(ajn_scene_decide(s, a, b, true), 1);
+    mp_require(h->source_bits == 8 && h->block_sad_threshold == 360);
     mp_require(ajn_scene_connect(s, ""));
     mp_require(!GetModuleHandleW(L"ajn-mvtools.dll"));
     ajn_scene_destroy(s);

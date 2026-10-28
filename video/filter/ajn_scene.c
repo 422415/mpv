@@ -214,6 +214,7 @@ static struct mp_image *mv_frame(struct ajn_scene *s, struct mp_image *image)
     // Unpack NV12/P010 without resizing, changing range or dropping chroma.
     planar->params.color = cpu->params.color;
     planar->params.repr = cpu->params.repr;
+    planar->params.chroma_location = cpu->params.chroma_location;
     bool ok = mp_sws_scale(s->sws, planar, cpu) >= 0;
     talloc_free(cpu);
     if (!ok) { talloc_free(planar); return NULL; }
