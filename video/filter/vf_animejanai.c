@@ -659,6 +659,21 @@ static bool configure_aji(struct mp_filter *vf)
         return true;  // no scaling chain; rife (if any) still applies
     }
 
+    // The upscale engine can be ready while a RIFE-first engine is still
+    // building. Its input resize has already been hoisted out of the chain,
+    // but we cannot enter the RIFE-first path until RIFE is active. Keep
+    // passing through source frames until poll() reconfigures the ready pair.
+    if (!p->rife_on && p->api.pre_resize) {
+        int ww = 0, wh = 0;
+        if (p->api.pre_resize(p->aji, &ww, &wh)) {
+            p->out_fmt = p->aji_fmt;
+            update_depth(vf);
+            MP_VERBOSE(vf, "Pre-RIFE downscale waiting for RIFE engine\n");
+            stream_status(vf, "building");
+            return true;
+        }
+    }
+
     p->aji_active = true;
     p->out_fmt = p->aji_fmt;
     if ((p->opts->output_444 || aji_format_is_444(p->aji_fmt)) &&
