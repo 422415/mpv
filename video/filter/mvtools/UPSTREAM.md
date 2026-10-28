@@ -1,0 +1,20 @@
+# MVTools scene detector source
+
+The analysis core is from dubhatervapoursynth/vapoursynth-mvtools,
+commit `17250aa979616ac48dfb0e18abfdcf2bd4e3afc0` (2026-06-21), under GPL-2.0-or-later.
+Source: https://github.com/dubhatervapoursynth/vapoursynth-mvtools/tree/17250aa979616ac48dfb0e18abfdcf2bd4e3afc0
+
+The adapter reproduces AnimeJaNai 3.2.1's `Super(pel=1)`, `Analyse(isb=True)`
+and `SCDetection(thscd1=240, thscd2=130)` defaults. It keeps the original search,
+pyramid, block coverage, chroma contribution, integer threshold scaling and
+strict greater-than comparisons. It consumes full-resolution planar YUV/gray.
+
+Local adaptations: the VapourSynth plugin interface is excluded; its allocation
+and row-copy helpers are supplied in `vendor/memory.h`; unused VS declarations
+were removed from `MVAnalysisData.h`. DCT is fixed to the legacy default of zero,
+so FFTW is not required. The initial build uses the original scalar paths rather
+than the optional architecture-specific assembly. No VapourSynth runtime is
+loaded or distributed. `detector.cpp` supplies the frame adapter and thresholds.
+
+The source revision of the affected user's old libmvtools.dll is not yet known.
+Visual equivalence and real-time performance need qualification on their clips.

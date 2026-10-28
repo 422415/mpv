@@ -7,6 +7,7 @@
 
 #define AJN_SCENE_MAGIC 0x31434a41
 #define AJN_SCENE_VERSION 1
+#define AJN_SCENE_MVTOOLS_VERSION 1
 #define AJN_SCENE_WIDTH 320
 #define AJN_SCENE_HEIGHT 180
 #define AJN_SCENE_PLANE (AJN_SCENE_WIDTH * AJN_SCENE_HEIGHT)
@@ -20,7 +21,12 @@ struct ajn_scene_shared {
     int32_t source_width, source_height, width, height;
     int32_t decision, status, timeouts, accepted, budget_ms, consecutive_timeouts;
     int64_t epoch;
-    uint8_t reserved[120];
+    // Optional extension: only used with privateMvtoolsSceneAbi=1 metadata.
+    // Zero preserves the original sandboxed detector protocol and offsets.
+    int32_t algorithm, thscd1, thscd2, changed_blocks, total_blocks, cut_pairs;
+    int64_t analysis_us, block_sad_threshold;
+    int32_t source_bits;
+    uint8_t reserved[76];
     uint8_t pixels[AJN_SCENE_BYTES];
 };
 _Static_assert(offsetof(struct ajn_scene_shared, pixels) == 256, "scene ABI layout");

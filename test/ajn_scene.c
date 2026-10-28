@@ -51,6 +51,7 @@ int main(void)
     HANDLE reply = CreateEventA(NULL, FALSE, FALSE, event_name);
     mp_require(ready && reply);
     struct ajn_scene *s = ajn_scene_create(NULL);
+    mp_require(!GetModuleHandleW(L"ajn-mvtools.dll"));
     mp_require(!ajn_scene_connect(s, "Local\\AJN.Scene.invalid"));
     mp_require(ajn_scene_connect(s, name) && ajn_scene_active(s));
     struct mp_image *a = mp_image_alloc(IMGFMT_Y8, 16, 8);
@@ -99,6 +100,26 @@ int main(void)
     mp_require(!ajn_scene_active(s));
     h->lease_until_ms = GetTickCount64() + 3000; h->enabled = 0;
     mp_require(!ajn_scene_active(s));
+    mp_require(!GetModuleHandleW(L"ajn-mvtools.dll"));
+    talloc_free(a); talloc_free(b);
+    a = mp_image_alloc(IMGFMT_Y8, 64, 64);
+    b = mp_image_alloc(IMGFMT_Y8, 64, 64);
+    mp_require(a && b);
+    a->pts = 1; b->pts = 2;
+    for (int y = 0; y < 64; y++) {
+        memset(a->planes[0] + y * a->stride[0], 16, 64);
+        memset(b->planes[0] + y * b->stride[0], 235, 64);
+    }
+    h->algorithm = 1; h->thscd1 = 240; h->thscd2 = 130;
+    h->enabled = 1; h->generation++; h->lease_until_ms = GetTickCount64() + 10000;
+    assert_int_equal(ajn_scene_decide(s, a, b, true), 1);
+    mp_require(h->status == 2 && h->total_blocks == 64 && h->changed_blocks == 64 && h->cut_pairs == 1);
+    mp_require(GetModuleHandleW(L"ajn-mvtools.dll"));
+    for (int y = 0; y < 64; y++) memset(b->planes[0] + y * b->stride[0], 16, 64);
+    ajn_scene_reset(s);
+    assert_int_equal(ajn_scene_decide(s, a, b, true), 0);
+    mp_require(ajn_scene_connect(s, ""));
+    mp_require(!GetModuleHandleW(L"ajn-mvtools.dll"));
     ajn_scene_destroy(s);
     talloc_free(a); talloc_free(b);
     UnmapViewOfFile(h); CloseHandle(mapping); CloseHandle(ready); CloseHandle(reply);
