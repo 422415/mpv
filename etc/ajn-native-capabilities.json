@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "privateSampleAbi": 1,
   "privatePlayerSampleAbi": 1,
+  "privatePlayerAnalysisAbi": 1,
   "privateOutputAbi": 1,
   "privateProbeAbi": 1,
   "privateMuxAbi": 1,

@@ -1442,7 +1442,7 @@ if features['cuda-hwaccel']
     sources += files('video/filter/vf_animejanai.c',
                      'video/out/hwdec/hwdec_cuda.c')
     if win32
-        sources += files('video/filter/ajn_scene.c')
+        sources += files('video/filter/ajn_scene.c', 'video/filter/ajn_sample_cuda.c')
         subdir('video/filter/mvtools')
     endif
 endif

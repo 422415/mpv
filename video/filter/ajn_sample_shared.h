@@ -33,13 +33,16 @@ struct ajn_sample_shared {
     int64_t producer;
     int64_t lease_until_ms;      // GetTickCount64; named player mappings only
     int64_t player_status;       // producer:32, status:32; stale status is ignored
-    uint8_t reserved[72];
+    uint32_t analysis, source_stage; // optional v2 paired masks; v1 remains BGRA
+    int64_t gpu_us, age_us;
+    uint8_t reserved[48];
     uint8_t pixels[AJN_SAMPLE_BYTES];
 };
 
 enum ajn_sample_status {
     AJN_SAMPLE_IDLE = 1, AJN_SAMPLE_PENDING, AJN_SAMPLE_READY,
     AJN_SAMPLE_UNSUPPORTED, AJN_SAMPLE_FAILED, AJN_SAMPLE_CLOSED,
+    AJN_SAMPLE_LOADING, AJN_SAMPLE_MODEL_MISSING, AJN_SAMPLE_BUILDING,
 };
 enum ajn_sample_primaries { AJN_PRIM_709 = 1, AJN_PRIM_601_525, AJN_PRIM_601_625 };
 enum ajn_sample_transfer { AJN_TRC_1886 = 1, AJN_TRC_SRGB, AJN_TRC_G22, AJN_TRC_G24 };
