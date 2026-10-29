@@ -163,10 +163,17 @@ int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
         bool enough_blocks = out->changed_blocks > int64_t(thscd2) * out->total_blocks * 75 / (130 * 256);
         bool flat_cut = enough_blocks && raw > std::max(12.0, 2 * old_raw) &&
                         std::min(s.all.variance(0), s.all.variance(1)) < 1;
+        // Dark shots may have too few corners for feature correspondence.
+        // After quiet history, anticorrelated (not flat) changed regions still
+        // provide evidence of an edit. Undefined correlation during a fade is
+        // zero, so it cannot take this path.
+        bool sparse_dark = old_raw == 2 && old_residual == 3 && raw > 5 &&
+            spatial < 0 && aligned < 0 && s.all.n &&
+            s.all.sum[0] < 32 * s.all.n && s.all.sum[1] < 32 * s.all.n;
         bool weak = enough_blocks && !d.last_cut && spatial < .4 && aligned < .88 &&
             (s.all.distance() > .12 || s.changed.distance() > .3) && histogram > .15 &&
             raw > 1.8 * old_raw && residual > 2.1 * old_residual &&
-            raw * residual > 5.5 * old_raw * old_residual && !s.all.dominated();
+            raw * residual > 5.5 * old_raw * old_residual && (!s.all.dominated() || sparse_dark);
         // A pan/zoom can change most pixels while retaining the same picture.
         // Require more feature matches to overturn a strong MVTools decision
         // than to reject a weak candidate. Insufficient detail is not evidence.
@@ -179,8 +186,13 @@ int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
             continuous = enhanced::correspondence(*a, *b, 8) == enhanced::Correspondence::Moving;
         // Luma continuity cannot disprove a cut detected only in chroma.
         if (raw < 1) continuous = false;
-        out->cut = (out->cut && !continuous) || flat_cut ||
-                   (weak && enhanced::correspondence(*a, *b, 4) == enhanced::Correspondence::Distinct);
+        bool cut = (out->cut && !continuous) || flat_cut;
+        if (!cut && weak) {
+            auto relation = enhanced::correspondence(*a, *b, 4);
+            cut = relation == enhanced::Correspondence::Distinct ||
+                  (sparse_dark && relation == enhanced::Correspondence::Unknown);
+        }
+        out->cut = cut;
         // Learn ordinary motion, not the discontinuity at an accepted cut.
         // There is no fixed quiet-shot warmup: a later cut may follow quickly.
         if (!out->cut) {
