@@ -9,6 +9,7 @@
 #include <iterator>
 #include <memory>
 #include <vector>
+#include "enhanced.h"
 
 namespace {
 struct Super {
@@ -67,13 +68,14 @@ struct Detector {
     std::vector<uint8_t> vectors;
     MVAnalysisData analysis{};
     MVPlaneSet mode = YPLANE;
-    int recent_changed[8]{};
-    int recent_count = 0, recent_next = 0;
     double enhanced_pts = NAN;
+    double recent_raw[4]{}, recent_residual[4]{};
+    int recent_next = 0;
+    bool last_cut = false;
     void reset_enhanced() {
-        std::fill(std::begin(recent_changed), std::end(recent_changed), 0);
-        recent_count = recent_next = 0;
-        enhanced_pts = NAN;
+        enhanced_pts = NAN; recent_next = 0; last_cut = false;
+        std::fill(std::begin(recent_raw), std::end(recent_raw), 0);
+        std::fill(std::begin(recent_residual), std::end(recent_residual), 0);
     }
     bool matches(const ajn_mvtools_frame &f) const {
         return previous && shape.width == f.width && shape.height == f.height &&
@@ -118,48 +120,6 @@ bool valid(const ajn_mvtools_frame &f) {
         if (!f.planes[p] || f.strides[p] < (f.width >> (p ? f.sub_w : 0)) * ((f.bits + 7) / 8)) return false;
     return true;
 }
-bool appearance_changed(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b) {
-    // At most 240x135 luma samples, normalized to 32 eight-bit bins. Coarse
-    // bins tolerate small decode/resize differences and video grain.
-    int hist[2][32]{};
-    int sx = (a.width + 239) / 240, sy = (a.height + 134) / 135;
-    int samples = 0;
-    int64_t sum[2]{}, squared[2]{}, product = 0;
-    const ajn_mvtools_frame *frames[] = {&a, &b};
-    for (int y = 0; y < a.height; y += sy) {
-        for (int x = 0; x < a.width; x += sx) {
-            unsigned values[2];
-            for (int i = 0; i < 2; ++i) {
-                const auto &f = *frames[i];
-                const auto *row = f.planes[0] + y * f.strides[0];
-                unsigned value;
-                if (f.bits == 8) value = row[x];
-                else {
-                    uint16_t pixel;
-                    std::memcpy(&pixel, row + x * 2, sizeof(pixel));
-                    value = pixel >> (f.bits - 8);
-                }
-                ++hist[i][std::min(value >> 3, 31u)];
-                values[i] = std::min(value, 255u);
-                sum[i] += values[i];
-                squared[i] += values[i] * values[i];
-            }
-            product += values[0] * values[1];
-            ++samples;
-        }
-    }
-    int difference = 0;
-    for (int i = 0; i < 32; ++i)
-        difference += std::abs(hist[0][i] - hist[1][i]);
-    // Histogram total variation >= 0.08 AND spatial correlation < 0.5.
-    // The spatial check rejects illumination changes and shape-preserving
-    // effects which can change the histogram without changing the shot.
-    if (difference * 100 < samples * 16) return false;
-    double covariance = double(samples) * product - double(sum[0]) * sum[1];
-    double variance0 = double(samples) * squared[0] - double(sum[0]) * sum[0];
-    double variance1 = double(samples) * squared[1] - double(sum[1]) * sum[1];
-    return covariance <= 0 || covariance * covariance < 0.25 * variance0 * variance1;
-}
 }
 int ajn_mvtools_version(void) { return AJN_MVTOOLS_ABI; }
 void *ajn_mvtools_create(void) { return new (std::nothrow) Detector; }
@@ -175,23 +135,65 @@ int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
     const ajn_mvtools_frame *b, int thscd1, int thscd2, ajn_mvtools_result *out) {
     int error = ajn_mvtools_analyze(context, a, b, thscd1, thscd2, out);
     if (error) return error;
-    auto &d = *static_cast<Detector *>(context);
-    if (d.enhanced_pts != a->pts) d.reset_enhanced();
-    int recent_max = *std::max_element(std::begin(d.recent_changed),
-                                      std::end(d.recent_changed));
-    // Recover weaker cuts only after a quiet shot (at most 2% changed blocks
-    // in each of the last eight pairs). Motion bursts and illumination effects
-    // need the independent appearance check; there is no lookahead or holdoff
-    // on legacy cuts. The first three pairs after a reset use legacy decisions.
-    if (!out->cut && d.recent_count >= 3 &&
-        out->changed_blocks > 75 * out->total_blocks / 256 &&
-        recent_max <= out->total_blocks / 50 && appearance_changed(*a, *b))
-        out->cut = 1;
-    d.recent_changed[d.recent_next] = out->changed_blocks;
-    d.recent_next = (d.recent_next + 1) % 8;
-    d.recent_count = std::min(d.recent_count + 1, 8);
-    d.enhanced_pts = b->pts;
-    return 0;
+    try {
+        auto &d = *static_cast<Detector *>(context);
+        if (d.enhanced_pts != a->pts) d.reset_enhanced();
+        auto s = enhanced::measure(*a, *b, d.motion->gop.planes[0]->vectors,
+                                  d.analysis.nBlkX, d.analysis.nBlkY, out->block_sad_threshold);
+        double raw = s.all.difference(), residual = s.matched.difference();
+        double spatial = s.changed.correlation(), aligned = s.matched.correlation();
+        double histogram = s.matched.distance();
+        double old_raw = std::max(2.0, *std::max_element(std::begin(d.recent_raw), std::end(d.recent_raw)));
+        double old_residual = std::max(3.0, *std::max_element(std::begin(d.recent_residual), std::end(d.recent_residual)));
+        // A block search can find similar patches even in unrelated pictures.
+        // Require agreement in the unwarped changed region as well. For
+        // deforming low-contrast textures, require stable appearance and motion
+        // energy over time; this also carries a fade through its final frame.
+        bool continuous = spatial > .95 || (spatial > .9 && aligned > .95) ||
+            (spatial > .6 && aligned > .85 && s.all.distance() < .12 && s.changed.distance() < .22) ||
+            (aligned > .65 && histogram < .22 && residual < .6 * s.changed.difference() &&
+             s.all.distance() < .15 && s.changed.distance() < .22 && spatial > .5) ||
+            (aligned > .65 && histogram < .22 && residual < .65 * s.changed.difference() &&
+             s.all.distance() < .12 && s.changed.distance() < .22 && raw < 1.6 * old_raw) ||
+            (std::max(s.all.variance(0), s.all.variance(1)) < 45 * 45 &&
+             s.all.distance() < .2 && histogram < .25 && aligned > .55 &&
+             raw < 1.5 * old_raw && residual < 1.5 * old_residual) ||
+            (std::max(s.changed.variance(0), s.changed.variance(1)) < 16 &&
+             (s.changed.difference() < 12 || raw < 1.5 * old_raw));
+        bool enough_blocks = out->changed_blocks > int64_t(thscd2) * out->total_blocks * 75 / (130 * 256);
+        bool flat_cut = enough_blocks && raw > std::max(12.0, 2 * old_raw) &&
+                        std::min(s.all.variance(0), s.all.variance(1)) < 1;
+        bool weak = enough_blocks && !d.last_cut && spatial < .4 && aligned < .88 &&
+            (s.all.distance() > .12 || s.changed.distance() > .3) && histogram > .15 &&
+            raw > 1.8 * old_raw && residual > 2.1 * old_residual &&
+            raw * residual > 5.5 * old_raw * old_residual && !s.all.dominated();
+        // A pan/zoom can change most pixels while retaining the same picture.
+        // Require more feature matches to overturn a strong MVTools decision
+        // than to reject a weak candidate. Insufficient detail is not evidence.
+        if (out->cut && !continuous && s.all.distance() < .3)
+            continuous = enhanced::correspondence(*a, *b, 8) == enhanced::Correspondence::Moving;
+        // Shared borders or a similar palette can mask an abrupt edit. Do not
+        // override the original decision without actual feature continuity.
+        if (out->cut && continuous && spatial < .9 && histogram > .15 &&
+            raw > 2 * old_raw && residual > 2 * old_residual)
+            continuous = enhanced::correspondence(*a, *b, 8) == enhanced::Correspondence::Moving;
+        // Luma continuity cannot disprove a cut detected only in chroma.
+        if (raw < 1) continuous = false;
+        out->cut = (out->cut && !continuous) || flat_cut ||
+                   (weak && enhanced::correspondence(*a, *b, 4) == enhanced::Correspondence::Distinct);
+        // Learn ordinary motion, not the discontinuity at an accepted cut.
+        // There is no fixed quiet-shot warmup: a later cut may follow quickly.
+        if (!out->cut) {
+            d.recent_raw[d.recent_next] = raw;
+            d.recent_residual[d.recent_next] = out->changed_blocks > out->total_blocks / 50 ? residual : 0;
+            d.recent_next = (d.recent_next + 1) % 4;
+        }
+        d.last_cut = out->cut;
+        d.enhanced_pts = b->pts;
+        return 0;
+    } catch (const std::exception &) {
+        return -2;
+    }
 }
 int ajn_mvtools_analyze(void *context, const ajn_mvtools_frame *a,
     const ajn_mvtools_frame *b, int thscd1, int thscd2, ajn_mvtools_result *out) {

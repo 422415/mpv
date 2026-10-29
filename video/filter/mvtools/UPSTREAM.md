@@ -20,12 +20,14 @@ are reused, with predictors cleared for each pair to preserve fresh Analyse
 semantics. No VapourSynth runtime is loaded or distributed. `detector.cpp`
 supplies the frame adapter and thresholds.
 
-The optional `ajn_mvtools_analyze_enhanced` export is AJN's additive heuristic,
-not part of upstream MVTools or the old `sc_mode=2` algorithm. It retains legacy
-cuts and recovers weaker cuts only after quiet motion history, with independent
-histogram and spatial-correlation checks. It uses the existing frame readback,
-adds no lookahead, and leaves the legacy export's results unchanged. A matching
-host/player advertises this separately as `privateEnhancedSceneAbi: 1`.
+The optional `ajn_mvtools_analyze_enhanced` export is AJN's scene classifier,
+not part of upstream MVTools or the old `sc_mode=2` algorithm. `enhanced.h`
+measures changed-region and motion-aligned appearance; temporal motion energy
+and feature correspondence distinguish weak cuts from continuous animation.
+It can accept cuts below the legacy block-count threshold or reject legacy
+false positives. It uses the existing frame readback, adds no lookahead, and
+leaves the legacy export's results unchanged. A matching host/player advertises
+this separately as `privateEnhancedSceneAbi: 1`.
 
 The source revision of the affected user's old libmvtools.dll is not yet known.
 Visual equivalence and real-time performance need qualification on their clips.

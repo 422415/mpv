@@ -37,9 +37,9 @@ AJN_MVTOOLS_EXPORT void ajn_mvtools_reset(void *context);
 AJN_MVTOOLS_EXPORT int ajn_mvtools_analyze(void *context,
     const struct ajn_mvtools_frame *previous, const struct ajn_mvtools_frame *current,
     int thscd1, int thscd2, struct ajn_mvtools_result *result);
-/* Additive enhanced mode: retain every legacy cut, and recover weaker cuts
- * only when recent motion and sampled luma histograms support a transition.
- * No lookahead. Reset on seeks; the first three pairs use legacy decisions.
+/* Enhanced mode independently classifies motion residuals using appearance
+ * within changed blocks, rejecting illumination/effects and detecting local
+ * picture cuts without a quiet-history requirement. No lookahead.
  * Same ABI/result layout; this optional export is advertised separately. */
 AJN_MVTOOLS_EXPORT int ajn_mvtools_analyze_enhanced(void *context,
     const struct ajn_mvtools_frame *previous, const struct ajn_mvtools_frame *current,

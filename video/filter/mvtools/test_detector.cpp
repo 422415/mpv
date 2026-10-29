@@ -83,8 +83,8 @@ static void enhanced_cuts() {
         require(ajn_mvtools_analyze(d, &a.f, &b.f, 240, 130, &legacy) == 0 && !legacy.cut &&
                 legacy.changed_blocks > 75 * legacy.total_blocks / 256, "localized cut fixture must be missed by legacy");
         ajn_mvtools_reset(d);
-        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
-                "enhanced mode must not invent quiet history after reset");
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && enhanced.cut,
+                "local picture cut must be detected immediately after reset");
         ajn_mvtools_reset(d);
         for (int i = 0; i < 3; ++i) {
             ajn_mvtools_frame next = a.f; a.f.pts = i; next.pts = i + 1;
@@ -94,19 +94,48 @@ static void enhanced_cuts() {
         a.f.pts = 3; b.f.pts = 4;
         require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && enhanced.cut &&
                 enhanced.changed_blocks == legacy.changed_blocks, "enhanced mode must recover a localized cut at both depths");
-        // Repeating the same amount of motion is not another quiet-shot cut.
-        b.f.pts = 4; a.f.pts = 5;
-        require(ajn_mvtools_analyze_enhanced(d, &b.f, &a.f, 240, 130, &enhanced) == 0, "motion return");
-        b.f.pts = 6;
-        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
-                "ongoing motion must not repeatedly trigger weak cuts");
-        // Explicit seek and timestamp discontinuity discard quiet history.
+        // A seek preserves pair-local classification.
         ajn_mvtools_reset(d); a.f.pts = 0; b.f.pts = 1;
-        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
-                "enhanced seek must discard motion history");
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && enhanced.cut,
+                "enhanced seek must not suppress the first cut");
         b.fill(0, (1 << bits) - 1); a.f.pts = 10; b.f.pts = 11;
         require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && enhanced.cut,
-                "enhanced mode must retain strong legacy cuts without warmup");
+                "large change to a flat frame is a cut without warmup");
+        // A fade onset can have undefined correlation: both frames are flat.
+        a.fill(0, 0); b.fill(0, 5 * ((1 << bits) - 1) / 255);
+        a.f.pts = 12; b.f.pts = 13;
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                "small fade out of black must not hold interpolation");
+        // Global illumination changes preserve structure despite high SAD.
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 128; ++x) {
+            int v = 20 + (x * 7 + y * 13) % 100;
+            for (int i = 0; i < 2; ++i) {
+                auto &image = i ? b : a;
+                int sample = (v + i * 30) * ((1 << bits) - 1) / 255;
+                size_t at = y * image.f.strides[0] + x * (bits / 8);
+                image.p[0][at] = sample & 255;
+                if (bits == 16) image.p[0][at + 1] = sample >> 8;
+            }
+        }
+        a.f.pts = 14; b.f.pts = 15;
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                "illumination must not masquerade as a cut at either depth");
+        ajn_mvtools_reset(d);
+        for (int step = 4; step > 0; --step) {
+            for (int y = 0; y < 64; ++y) for (int x = 0; x < 128; ++x) {
+                for (int i = 0; i < 2; ++i) {
+                    auto &image = i ? b : a;
+                    int v = (200 + (x + y) % 32) * (step - i) / 4;
+                    int sample = v * ((1 << bits) - 1) / 255;
+                    size_t at = y * image.f.strides[0] + x * (bits / 8);
+                    image.p[0][at] = sample & 255;
+                    if (bits == 16) image.p[0][at + 1] = sample >> 8;
+                }
+            }
+            a.f.pts = 20 + 4 - step; b.f.pts = a.f.pts + 1;
+            require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                    "a continuous fade must reach black without a final hold");
+        }
         ajn_mvtools_destroy(d);
     }
 }
@@ -125,6 +154,8 @@ int main(int argc, char **argv) {
     cb.fill(1, 400); cb.fill(2, 400);
     require(ajn_mvtools_analyze(d, &ca.f, &cb.f, 240, 130, &r) == 0 && r.cut &&
             r.block_sad_threshold == 1444, "10-bit chroma and threshold rounding");
+    require(ajn_mvtools_analyze_enhanced(d, &ca.f, &cb.f, 240, 130, &r) == 0 && r.cut,
+            "luma-only continuity must preserve a chroma-only cut");
     // A seek must discard a cached super frame even when timestamps repeat.
     cb.fill(1, 0); cb.fill(2, 0); ajn_mvtools_reset(d);
     require(ajn_mvtools_analyze(d, &ca.f, &cb.f, 240, 130, &r) == 0 && !r.cut, "seek reset");
@@ -141,6 +172,8 @@ int main(int argc, char **argv) {
     panA.fill(1, 128); panA.fill(2, 128); panB.fill(1, 128); panB.fill(2, 128);
     auto start = std::chrono::steady_clock::now();
     require(ajn_mvtools_analyze(d, &panA.f, &panB.f, 240, 130, &r) == 0 && !r.cut, "pan must remain continuous");
+    require(ajn_mvtools_analyze_enhanced(d, &panA.f, &panB.f, 240, 130, &r) == 0 && !r.cut,
+            "enhanced mode must keep a translated shot continuous");
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     Image next(width, height, 8, true, 2);
     next.fill(1, 128); next.fill(2, 128);
