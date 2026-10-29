@@ -120,6 +120,16 @@ bool valid(const ajn_mvtools_frame &f) {
         if (!f.planes[p] || f.strides[p] < (f.width >> (p ? f.sub_w : 0)) * ((f.bits + 7) / 8)) return false;
     return true;
 }
+bool identical(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b) {
+    for (int p = 0; p < (a.planes[1] ? 3 : 1); ++p) {
+        int width = (a.width >> (p ? a.sub_w : 0)) * ((a.bits + 7) / 8);
+        int height = a.height >> (p ? a.sub_h : 0);
+        for (int y = 0; y < height; ++y)
+            if (std::memcmp(a.planes[p] + y * a.strides[p],
+                            b.planes[p] + y * b.strides[p], width)) return false;
+    }
+    return true;
+}
 }
 int ajn_mvtools_version(void) { return AJN_MVTOOLS_ABI; }
 void *ajn_mvtools_create(void) { return new (std::nothrow) Detector; }
@@ -133,6 +143,32 @@ void ajn_mvtools_reset(void *context) {
 }
 int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
     const ajn_mvtools_frame *b, int thscd1, int thscd2, ajn_mvtools_result *out) {
+    // This read-only shortcut precedes the original search. Validate its
+    // inputs before reading pixels; every other pair follows the legacy path.
+    if (context && a && b && out && valid(*a) && valid(*b) &&
+        a->width == b->width && a->height == b->height && a->bits == b->bits &&
+        a->sub_w == b->sub_w && a->sub_h == b->sub_h &&
+        (!!a->planes[1] == !!b->planes[1]) && b->pts > a->pts &&
+        thscd1 >= 0 && thscd1 <= 16320 && thscd2 >= 0 && thscd2 <= 255 && identical(*a, *b)) {
+        auto &d = *static_cast<Detector *>(context);
+        if (!d.matches(*a) || d.enhanced_pts != a->pts) d.reset_enhanced();
+        // Preserve the normal history update for a zero-difference pair.
+        d.recent_raw[d.recent_next] = d.recent_residual[d.recent_next] = 0;
+        d.recent_next = (d.recent_next + 1) % 4;
+        // A cached pyramid of a is also a valid pyramid of its exact repeat b.
+        if (d.matches(*a)) {
+            if (d.current->pts == a->pts) d.current->pts = b->pts;
+            if (d.previous->pts == a->pts) d.previous->pts = b->pts;
+        }
+        int64_t sad = thscd1;
+        if (a->planes[1]) sad += sad / ((1 << a->sub_w) * (1 << a->sub_h)) * 2;
+        sad = static_cast<int64_t>(sad * ((1 << a->bits) - 1) / 255.0 + .5);
+        int total = (a->width / 8) * (a->height / 8);
+        *out = {0, 0, total, thscd2 * total / 256, sad};
+        d.last_cut = false;
+        d.enhanced_pts = b->pts;
+        return 0;
+    }
     int error = ajn_mvtools_analyze(context, a, b, thscd1, thscd2, out);
     if (error) return error;
     try {

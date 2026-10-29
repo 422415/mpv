@@ -230,6 +230,39 @@ static void enhanced_cuts() {
         ajn_mvtools_destroy(d);
     }
 }
+static void repeated_frames() {
+    for (int bits : {8, 16}) {
+        Image a(128, 64, bits, true, 0), b(128, 64, bits, true, 1);
+        int scale = ((1 << bits) - 1) / 255;
+        a.fill(0, 40 * scale); b.fill(0, 40 * scale);
+        a.fill(1, 128 * scale); b.fill(1, 128 * scale);
+        a.fill(2, 128 * scale); b.fill(2, 128 * scale);
+        void *fast = ajn_mvtools_create(), *legacy = ajn_mvtools_create();
+        ajn_mvtools_result expected{}, actual{};
+        require(ajn_mvtools_analyze(legacy, &a.f, &b.f, 240, 130, &expected) == 0 &&
+                ajn_mvtools_analyze_enhanced(fast, &a.f, &b.f, 240, 130, &actual) == 0 &&
+                actual.cut == expected.cut && actual.changed_blocks == expected.changed_blocks &&
+                actual.total_blocks == expected.total_blocks &&
+                actual.block_count_threshold == expected.block_count_threshold &&
+                actual.block_sad_threshold == expected.block_sad_threshold,
+                "an exact repeat preserves the full legacy result at both depths");
+        // Luma equality alone must never bypass a chroma edit.
+        a.f.pts = 1; b.f.pts = 2; b.fill(1, 0); b.fill(2, 255 * scale);
+        require(ajn_mvtools_analyze_enhanced(fast, &a.f, &b.f, 240, 130, &actual) == 0 && actual.cut,
+                "identical luma with changed chroma still needs analysis");
+        // Reuse a populated pyramid through repeats, then switch API modes.
+        a.f.pts = 2; b.f.pts = 3; a.fill(1, 0); a.fill(2, 255 * scale);
+        require(ajn_mvtools_analyze_enhanced(fast, &a.f, &b.f, 240, 130, &actual) == 0 && !actual.cut,
+                "repeat after a cut remains continuous");
+        a.f.pts = 3; b.f.pts = 4; b.fill(0, 120 * scale);
+        matches_fresh(fast, a.f, b.f);
+        ajn_mvtools_reset(fast);
+        a.f.pts = 0; b.f.pts = 1; b.fill(0, 40 * scale);
+        require(ajn_mvtools_analyze_enhanced(fast, &a.f, &b.f, -1, 130, &actual) == -1,
+                "exact repeats must not bypass parameter validation");
+        ajn_mvtools_destroy(fast); ajn_mvtools_destroy(legacy);
+    }
+}
 int main(int argc, char **argv) {
     corner_order();
     patch_tracking();
@@ -237,6 +270,7 @@ int main(int argc, char **argv) {
     deforming_patches();
     kernels_match();
     enhanced_cuts();
+    repeated_frames();
     void *d = ajn_mvtools_create(); require(d, "create");
     ajn_mvtools_result r{};
     Image a(64, 64, 8, false, 0), b(64, 64, 8, false, 1);
