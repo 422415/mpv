@@ -6,10 +6,27 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
+#include "vendor/MVAnalysisData.h"
+#include "enhanced.h"
 
 static void require(bool value, const char *message) {
     if (!value) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
+}
+static void corner_order() {
+    // Equal-strength corners at the score cutoff: preserve row-major ties
+    // and the five-pixel spacing produced by neighbourhood suppression.
+    std::vector<float> a(32 * 32), b(a.size());
+    for (int y = 0; y < 32; ++y) for (int x = 0; x < 32; ++x) {
+        a[y * 32 + x] = 2 * (x + y);
+        b[y * 32 + x] = a[y * 32 + x] + 8;
+    }
+    auto points = enhanced::points(a, b, 32, 32);
+    require(points.size() == 16, "corner score cutoff and suppression coverage");
+    for (int i = 0; i < 16; ++i)
+        require(points[i].x == 6 + 5 * (i % 4) && points[i].y == 6 + 5 * (i / 4),
+                "equal-strength corners must retain row-major selection order");
 }
 static void kernels_match() {
     // Every block shape used by 8x8 analysis and its chroma planes. Source
@@ -140,6 +157,7 @@ static void enhanced_cuts() {
     }
 }
 int main(int argc, char **argv) {
+    corner_order();
     kernels_match();
     enhanced_cuts();
     void *d = ajn_mvtools_create(); require(d, "create");

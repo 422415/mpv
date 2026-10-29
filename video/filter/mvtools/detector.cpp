@@ -177,8 +177,15 @@ int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
         // A pan/zoom can change most pixels while retaining the same picture.
         // Require more feature matches to overturn a strong MVTools decision
         // than to reject a weak candidate. Insufficient detail is not evidence.
-        if (out->cut && !continuous && s.all.distance() < .3)
+        if (out->cut && !continuous && s.all.distance() < .3) {
             continuous = enhanced::correspondence(*a, *b, 8) == enhanced::Correspondence::Moving;
+            // Smaller image patches can track a deforming face that coarse
+            // descriptors lose. Restrict refinement to already aligned,
+            // ongoing motion; abrupt edits need the stronger coarse evidence.
+            if (!continuous && spatial > .5 && aligned > .85 &&
+                raw <= 2 * old_raw && residual <= 2 * old_residual)
+                continuous = enhanced::correspondence(*a, *b, 8, true) == enhanced::Correspondence::Moving;
+        }
         // Shared borders or a similar palette can mask an abrupt edit. Do not
         // override the original decision without actual feature continuity.
         if (out->cut && continuous && spatial < .9 && histogram > .15 &&

@@ -74,17 +74,25 @@ inline std::vector<float> thumbnail(const ajn_mvtools_frame &f, int w, int h) {
 inline std::vector<Point> points(const std::vector<float> &a,
                                  const std::vector<float> &b, int w, int h) {
     std::vector<float> score(w * h);
+    std::vector<int> candidates;
     for (int y = 6; y < h - 6; ++y) for (int x = 6; x < w - 6; ++x) {
         int i = y * w + x;
         if (std::abs(a[i] - b[i]) <= 3) continue;
         float gx = (a[i + 1] - a[i - 1]) * .5f, gy = (a[i + w] - a[i - w]) * .5f;
         score[i] = std::min(gx * gx, gy * gy);
+        if (score[i] >= 4) candidates.push_back(i);
     }
+    // Match max_element's first-pixel tie break without rescanning the image
+    // for each corner. Suppressed candidates are skipped in this fixed order.
+    std::sort(candidates.begin(), candidates.end(), [&](int a, int b) {
+        return score[a] != score[b] ? score[a] > score[b] : a < b;
+    });
     std::vector<Point> out;
-    for (int n = 0; n < 96; ++n) {
-        auto at = std::max_element(score.begin(), score.end());
-        if (*at < 4) break;
-        int i = int(at - score.begin()), x = i % w, y = i / w;
+    int selected = 0;
+    for (int i : candidates) {
+        if (!score[i]) continue;
+        if (selected++ == 96) break;
+        int x = i % w, y = i / w;
         Point p{x, y, {}}; int k = 0; float sum = 0, norm = 0;
         for (int yy = y - 5; yy <= y + 5; yy += 2)
             for (int xx = x - 5; xx <= x + 5; xx += 2) sum += (p.descriptor[k++] = a[yy * w + xx]);
@@ -104,9 +112,10 @@ inline std::vector<Point> points(const std::vector<float> &a,
 // features. Ignore stationary matches: shared titles/borders are not continuity.
 enum class Correspondence { Unknown, Distinct, Moving };
 inline Correspondence correspondence(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b,
-                                     int required_matches) {
-    int w = std::min(120, a.width), h = std::max(1, std::min(a.height, (a.height * w + a.width / 2) / a.width));
-    if (h > 68) { w = std::max(1, w * 68 / h); h = 68; }
+                                     int required_matches, bool finer = false) {
+    int max_w = finer ? 240 : 120, max_h = finer ? 135 : 68;
+    int w = std::min(max_w, a.width), h = std::max(1, std::min(a.height, (a.height * w + a.width / 2) / a.width));
+    if (h > max_h) { w = std::max(1, w * max_h / h); h = max_h; }
     if (w < 13 || h < 13) return Correspondence::Unknown;
     auto ta = thumbnail(a, w, h), tb = thumbnail(b, w, h);
     auto pa = points(ta, tb, w, h), pb = points(tb, ta, w, h);
