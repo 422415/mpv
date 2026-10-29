@@ -60,6 +60,43 @@ inline Appearance measure(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b
     return s;
 }
 
+inline bool patch_motion(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b,
+                         const VECTOR *vectors, int nx, int ny, int64_t threshold) {
+    // Expanding effects need not retain corners or one rigid motion. Verify
+    // the existing block vectors against larger, textured neighbourhoods.
+    // Independent moving patches must cover a two-dimensional area in both
+    // pictures; a shared border or one matched object is insufficient.
+    int source_cells[12]{}, target_cells[12]{}, good = 0;
+    auto spread = [](const int *cells) {
+        for (int i = 0; i < 12; ++i) if (cells[i] >= 3)
+            for (int j = 0; j < i; ++j) if (cells[j] >= 3)
+                for (int k = 0; k < j; ++k) if (cells[k] >= 3 &&
+                    (i % 4 - k % 4) * (j / 4 - k / 4) !=
+                    (j % 4 - k % 4) * (i / 4 - k / 4)) return true;
+        return false;
+    };
+    for (int by = 2; by < ny - 2; by += 4) for (int bx = 2; bx < nx - 2; bx += 4) {
+        const auto &v = vectors[by * nx + bx];
+        if (v.sad <= threshold || int64_t(v.x) * v.x + int64_t(v.y) * v.y <= 16) continue;
+        int x = bx * 8 + 4, y = by * 8 + 4, u = x + v.x, z = y + v.y;
+        if (u < 16 || z < 16 || u + 16 >= b.width || z + 16 >= b.height) continue;
+        Moments matched;
+        int direct = 0;
+        for (int yy = -16; yy <= 16; yy += 4) for (int xx = -16; xx <= 16; xx += 4) {
+            int value = pixel(a, x + xx, y + yy);
+            direct += std::abs(value - pixel(b, x + xx, y + yy));
+            matched.add(value, pixel(b, u + xx, z + yy));
+        }
+        if (std::min(matched.variance(0), matched.variance(1)) <= 100 ||
+            matched.correlation() <= .9 || matched.absolute >= .6 * direct) continue;
+        ++good;
+        ++source_cells[(y * 3 / a.height) * 4 + x * 4 / a.width];
+        ++target_cells[(z * 3 / b.height) * 4 + u * 4 / b.width];
+        if (good >= 12 && spread(source_cells) && spread(target_cells)) return true;
+    }
+    return false;
+}
+
 struct Point { int x, y; std::array<float, 36> descriptor; };
 inline std::vector<float> thumbnail(const ajn_mvtools_frame &f, int w, int h) {
     std::vector<float> out(w * h);

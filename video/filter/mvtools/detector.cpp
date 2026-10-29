@@ -185,6 +185,12 @@ int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
             if (!continuous && spatial > .5 && aligned > .85 &&
                 raw <= 2 * old_raw && residual <= 2 * old_residual)
                 continuous = enhanced::correspondence(*a, *b, 8, true, d.motion->gop.planes[0]->vectors) == enhanced::Correspondence::Moving;
+            // Effects can deform too much for sparse corner correspondence.
+            // Require distributed patch continuity and an established motion
+            // history before overriding a cut with this evidence.
+            if (!continuous && aligned > .85 && raw <= 2 * old_raw && residual <= 2 * old_residual)
+                continuous = enhanced::patch_motion(*a, *b, d.motion->gop.planes[0]->vectors,
+                    d.analysis.nBlkX, d.analysis.nBlkY, out->block_sad_threshold);
         }
         // Shared borders or a similar palette can mask an abrupt edit. Do not
         // override the original decision without actual feature continuity.

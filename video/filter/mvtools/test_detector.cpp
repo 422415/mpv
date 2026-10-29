@@ -79,6 +79,29 @@ static void regional_motion() {
         matches.push_back({{20 + i * 10,30,{}},{30 + i * 10,40,{}}});
     require(!enhanced::regional_matches(matches, 45), "collinear edge tracks cannot establish regions");
 }
+static void deforming_patches() {
+    constexpr int w = 640, h = 384;
+    std::vector<uint8_t> a(w * h), b(a.size());
+    uint32_t random = 39;
+    for (auto &v : a) { random = random * 1664525u + 1013904223u; v = random >> 24; }
+    auto motion = [](int x, int y) { return y < h / 2 ? (x < w / 2 ? 8 : -8) : (x < w / 2 ? -12 : 12); };
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
+        b[y * w + x] = a[y * w + std::clamp(x - motion(x, y), 0, w - 1)];
+    std::vector<VECTOR> vectors(w / 8 * (h / 8));
+    for (int y = 0; y < h / 8; ++y) for (int x = 0; x < w / 8; ++x)
+        vectors[y * (w / 8) + x] = {motion(x * 8 + 4, y * 8 + 4), 0, 4096};
+    ajn_mvtools_frame fa{}, fb{};
+    fa.width = fb.width = w; fa.height = fb.height = h; fa.bits = fb.bits = 8;
+    fa.planes[0] = a.data(); fb.planes[0] = b.data(); fa.strides[0] = fb.strides[0] = w;
+    require(enhanced::patch_motion(fa, fb, vectors.data(), w / 8, h / 8, 360),
+            "independent textured regions moving in opposing directions remain continuous");
+    std::fill(b.begin() + w * (h / 3), b.end(), 0);
+    require(!enhanced::patch_motion(fa, fb, vectors.data(), w / 8, h / 8, 360),
+            "a shared moving strip cannot hide a change in the rest of the picture");
+    for (auto &v : b) { random = random * 1664525u + 1013904223u; v = random >> 24; }
+    require(!enhanced::patch_motion(fa, fb, vectors.data(), w / 8, h / 8, 360),
+            "unrelated textures do not establish motion from plausible vectors alone");
+}
 static void kernels_match() {
     // Every block shape used by 8x8 analysis and its chroma planes. Source
     // blocks are packed by Analyse; reference rows have their own stride.
@@ -211,6 +234,7 @@ int main(int argc, char **argv) {
     corner_order();
     patch_tracking();
     regional_motion();
+    deforming_patches();
     kernels_match();
     enhanced_cuts();
     void *d = ajn_mvtools_create(); require(d, "create");
