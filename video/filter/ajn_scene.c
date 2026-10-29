@@ -36,6 +36,9 @@ struct ajn_scene {
     int (*mv_analyze)(void *, const struct ajn_mvtools_frame *,
                       const struct ajn_mvtools_frame *, int, int,
                       struct ajn_mvtools_result *);
+    int (*mv_enhanced)(void *, const struct ajn_mvtools_frame *,
+                       const struct ajn_mvtools_frame *, int, int,
+                       struct ajn_mvtools_result *);
 };
 static void mv_close(struct ajn_scene *s)
 {
@@ -64,6 +67,7 @@ static bool mv_open(struct ajn_scene *s)
     s->mv_destroy = (void *)GetProcAddress(s->mv_module, "ajn_mvtools_destroy");
     s->mv_reset = (void *)GetProcAddress(s->mv_module, "ajn_mvtools_reset");
     s->mv_analyze = (void *)GetProcAddress(s->mv_module, "ajn_mvtools_analyze");
+    s->mv_enhanced = (void *)GetProcAddress(s->mv_module, "ajn_mvtools_analyze_enhanced");
     if (!version || version() != AJN_MVTOOLS_ABI || !s->mv_create ||
         !s->mv_destroy || !s->mv_reset || !s->mv_analyze) goto fail;
     s->mv_context = s->mv_create();
@@ -233,7 +237,7 @@ static struct ajn_mvtools_frame mv_description(struct mp_image *image)
     return f;
 }
 static int mv_decide(struct ajn_scene *s, struct mp_image *a, struct mp_image *b,
-                     int64_t generation, int th1, int th2)
+                     int64_t generation, int th1, int th2, bool enhanced)
 {
     LARGE_INTEGER start, end, frequency;
     QueryPerformanceCounter(&start); QueryPerformanceFrequency(&frequency);
@@ -242,6 +246,7 @@ static int mv_decide(struct ajn_scene *s, struct mp_image *a, struct mp_image *b
     struct mp_image *previous = NULL, *current = NULL;
     int bits = 0;
     if (!mv_open(s)) goto done;
+    if (enhanced && !s->mv_enhanced) goto done;
     if (s->mv_generation != generation) {
         s->mv_reset(s->mv_context); TA_FREEP(&s->mv_cached);
         s->mv_generation = generation;
@@ -255,7 +260,8 @@ static int mv_decide(struct ajn_scene *s, struct mp_image *a, struct mp_image *b
     if (!previous || !current) goto done;
     struct ajn_mvtools_frame fa = mv_description(previous), fb = mv_description(current);
     bits = fb.bits;
-    int error = s->mv_analyze(s->mv_context, &fa, &fb, th1, th2, &result);
+    int error = enhanced ? s->mv_enhanced(s->mv_context, &fa, &fb, th1, th2, &result) :
+                           s->mv_analyze(s->mv_context, &fa, &fb, th1, th2, &result);
     state = error == -1 ? 4 : error ? 8 : 2;
     if (!error) decision = result.cut;
     TA_FREEP(&s->mv_cached);
@@ -294,7 +300,8 @@ int ajn_scene_decide(struct ajn_scene *s, struct mp_image *a, struct mp_image *b
         height < 1 || height > AJN_SCENE_HEIGHT || budget < 5 || budget > 100 ||
         !isfinite(a->pts) || !isfinite(b->pts) || a->pts == MP_NOPTS_VALUE ||
         b->pts <= a->pts || a->w != b->w || a->h != b->h) return -1;
-    if (algorithm == 1) return mv_decide(s, a, b, generation, th1, th2);
+    if (algorithm == 1 || algorithm == 2)
+        return mv_decide(s, a, b, generation, th1, th2, algorithm == 2);
     if (algorithm != 0) return -1;
     int bytes = width * height;
     bool cached = s->cached_pts == a->pts && s->cached_w == width &&

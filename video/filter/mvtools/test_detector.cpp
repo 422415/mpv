@@ -66,8 +66,53 @@ struct Image {
         }
     }
 };
+static void enhanced_cuts() {
+    for (int bits : {8, 16}) {
+        // A localized hard cut: the rest of the image stays dark, so fewer
+        // than half of the blocks change. Test the full analysis path.
+        Image a(128, 64, bits, false, 0), b(128, 64, bits, false, 1);
+        a.fill(0, 0); b.fill(0, 0);
+        int value = 80 * ((1 << bits) - 1) / 255;
+        for (int y = 0; y < 64; ++y) for (int x = 40; x < 88; ++x) {
+            size_t at = y * a.f.strides[0] + x * (bits / 8);
+            a.p[0][at] = value & 255;
+            if (bits == 16) a.p[0][at + 1] = value >> 8;
+        }
+        void *d = ajn_mvtools_create();
+        ajn_mvtools_result legacy{}, enhanced{};
+        require(ajn_mvtools_analyze(d, &a.f, &b.f, 240, 130, &legacy) == 0 && !legacy.cut &&
+                legacy.changed_blocks > 75 * legacy.total_blocks / 256, "localized cut fixture must be missed by legacy");
+        ajn_mvtools_reset(d);
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                "enhanced mode must not invent quiet history after reset");
+        ajn_mvtools_reset(d);
+        for (int i = 0; i < 3; ++i) {
+            ajn_mvtools_frame next = a.f; a.f.pts = i; next.pts = i + 1;
+            require(ajn_mvtools_analyze_enhanced(d, &a.f, &next, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                    "static warmup must remain continuous");
+        }
+        a.f.pts = 3; b.f.pts = 4;
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && enhanced.cut &&
+                enhanced.changed_blocks == legacy.changed_blocks, "enhanced mode must recover a localized cut at both depths");
+        // Repeating the same amount of motion is not another quiet-shot cut.
+        b.f.pts = 4; a.f.pts = 5;
+        require(ajn_mvtools_analyze_enhanced(d, &b.f, &a.f, 240, 130, &enhanced) == 0, "motion return");
+        b.f.pts = 6;
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                "ongoing motion must not repeatedly trigger weak cuts");
+        // Explicit seek and timestamp discontinuity discard quiet history.
+        ajn_mvtools_reset(d); a.f.pts = 0; b.f.pts = 1;
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && !enhanced.cut,
+                "enhanced seek must discard motion history");
+        b.fill(0, (1 << bits) - 1); a.f.pts = 10; b.f.pts = 11;
+        require(ajn_mvtools_analyze_enhanced(d, &a.f, &b.f, 240, 130, &enhanced) == 0 && enhanced.cut,
+                "enhanced mode must retain strong legacy cuts without warmup");
+        ajn_mvtools_destroy(d);
+    }
+}
 int main(int argc, char **argv) {
     kernels_match();
+    enhanced_cuts();
     void *d = ajn_mvtools_create(); require(d, "create");
     ajn_mvtools_result r{};
     Image a(64, 64, 8, false, 0), b(64, 64, 8, false, 1);
@@ -109,7 +154,7 @@ int main(int argc, char **argv) {
     ajn_mvtools_reset(d);
     next.f.pts = 4;
     matches_fresh(d, panA.f, next.f);
-    std::printf("PASS SIMD/scalar parity, workspace reuse, legacy thresholds, chroma, depth, reset and pan; %dx%d first pair %.3f ms (%d/%d changed blocks)\n",
+    std::printf("PASS enhanced localized cuts/motion/reset, SIMD/scalar parity, workspace reuse, legacy thresholds, chroma, depth, reset and pan; %dx%d first pair %.3f ms (%d/%d changed blocks)\n",
                  width, height, ms, r.changed_blocks, r.total_blocks);
     ajn_mvtools_destroy(d);
 }

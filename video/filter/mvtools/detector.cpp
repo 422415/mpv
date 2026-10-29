@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <vector>
 
@@ -66,6 +67,14 @@ struct Detector {
     std::vector<uint8_t> vectors;
     MVAnalysisData analysis{};
     MVPlaneSet mode = YPLANE;
+    int recent_changed[8]{};
+    int recent_count = 0, recent_next = 0;
+    double enhanced_pts = NAN;
+    void reset_enhanced() {
+        std::fill(std::begin(recent_changed), std::end(recent_changed), 0);
+        recent_count = recent_next = 0;
+        enhanced_pts = NAN;
+    }
     bool matches(const ajn_mvtools_frame &f) const {
         return previous && shape.width == f.width && shape.height == f.height &&
             shape.bits == f.bits && shape.sub_w == f.sub_w && shape.sub_h == f.sub_h &&
@@ -96,6 +105,7 @@ struct Detector {
         motion = std::make_unique<Motion>(a);
         vectors.resize(gopGetArraySize(&motion->gop));
         shape = f;
+        reset_enhanced();
     }
 };
 bool valid(const ajn_mvtools_frame &f) {
@@ -108,13 +118,80 @@ bool valid(const ajn_mvtools_frame &f) {
         if (!f.planes[p] || f.strides[p] < (f.width >> (p ? f.sub_w : 0)) * ((f.bits + 7) / 8)) return false;
     return true;
 }
+bool appearance_changed(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b) {
+    // At most 240x135 luma samples, normalized to 32 eight-bit bins. Coarse
+    // bins tolerate small decode/resize differences and video grain.
+    int hist[2][32]{};
+    int sx = (a.width + 239) / 240, sy = (a.height + 134) / 135;
+    int samples = 0;
+    int64_t sum[2]{}, squared[2]{}, product = 0;
+    const ajn_mvtools_frame *frames[] = {&a, &b};
+    for (int y = 0; y < a.height; y += sy) {
+        for (int x = 0; x < a.width; x += sx) {
+            unsigned values[2];
+            for (int i = 0; i < 2; ++i) {
+                const auto &f = *frames[i];
+                const auto *row = f.planes[0] + y * f.strides[0];
+                unsigned value;
+                if (f.bits == 8) value = row[x];
+                else {
+                    uint16_t pixel;
+                    std::memcpy(&pixel, row + x * 2, sizeof(pixel));
+                    value = pixel >> (f.bits - 8);
+                }
+                ++hist[i][std::min(value >> 3, 31u)];
+                values[i] = std::min(value, 255u);
+                sum[i] += values[i];
+                squared[i] += values[i] * values[i];
+            }
+            product += values[0] * values[1];
+            ++samples;
+        }
+    }
+    int difference = 0;
+    for (int i = 0; i < 32; ++i)
+        difference += std::abs(hist[0][i] - hist[1][i]);
+    // Histogram total variation >= 0.08 AND spatial correlation < 0.5.
+    // The spatial check rejects illumination changes and shape-preserving
+    // effects which can change the histogram without changing the shot.
+    if (difference * 100 < samples * 16) return false;
+    double covariance = double(samples) * product - double(sum[0]) * sum[1];
+    double variance0 = double(samples) * squared[0] - double(sum[0]) * sum[0];
+    double variance1 = double(samples) * squared[1] - double(sum[1]) * sum[1];
+    return covariance <= 0 || covariance * covariance < 0.25 * variance0 * variance1;
+}
 }
 int ajn_mvtools_version(void) { return AJN_MVTOOLS_ABI; }
 void *ajn_mvtools_create(void) { return new (std::nothrow) Detector; }
 void ajn_mvtools_destroy(void *context) { delete static_cast<Detector *>(context); }
 void ajn_mvtools_reset(void *context) {
     auto *d = static_cast<Detector *>(context);
-    if (d && d->previous) d->previous->pts = d->current->pts = NAN;
+    if (d) {
+        if (d->previous) d->previous->pts = d->current->pts = NAN;
+        d->reset_enhanced();
+    }
+}
+int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
+    const ajn_mvtools_frame *b, int thscd1, int thscd2, ajn_mvtools_result *out) {
+    int error = ajn_mvtools_analyze(context, a, b, thscd1, thscd2, out);
+    if (error) return error;
+    auto &d = *static_cast<Detector *>(context);
+    if (d.enhanced_pts != a->pts) d.reset_enhanced();
+    int recent_max = *std::max_element(std::begin(d.recent_changed),
+                                      std::end(d.recent_changed));
+    // Recover weaker cuts only after a quiet shot (at most 2% changed blocks
+    // in each of the last eight pairs). Motion bursts and illumination effects
+    // need the independent appearance check; there is no lookahead or holdoff
+    // on legacy cuts. The first three pairs after a reset use legacy decisions.
+    if (!out->cut && d.recent_count >= 3 &&
+        out->changed_blocks > 75 * out->total_blocks / 256 &&
+        recent_max <= out->total_blocks / 50 && appearance_changed(*a, *b))
+        out->cut = 1;
+    d.recent_changed[d.recent_next] = out->changed_blocks;
+    d.recent_next = (d.recent_next + 1) % 8;
+    d.recent_count = std::min(d.recent_count + 1, 8);
+    d.enhanced_pts = b->pts;
+    return 0;
 }
 int ajn_mvtools_analyze(void *context, const ajn_mvtools_frame *a,
     const ajn_mvtools_frame *b, int thscd1, int thscd2, ajn_mvtools_result *out) {

@@ -8,6 +8,7 @@
 #define AJN_SCENE_MAGIC 0x31434a41
 #define AJN_SCENE_VERSION 1
 #define AJN_SCENE_MVTOOLS_VERSION 1
+#define AJN_SCENE_ENHANCED_VERSION 1
 #define AJN_SCENE_WIDTH 320
 #define AJN_SCENE_HEIGHT 180
 #define AJN_SCENE_PLANE (AJN_SCENE_WIDTH * AJN_SCENE_HEIGHT)
@@ -23,6 +24,7 @@ struct ajn_scene_shared {
     int64_t epoch;
     // Optional extension: only used with privateMvtoolsSceneAbi=1 metadata.
     // Zero preserves the original sandboxed detector protocol and offsets.
+    // algorithm: 0 = custom, 1 = legacy MVTools, 2 = enhanced (separate capability).
     int32_t algorithm, thscd1, thscd2, changed_blocks, total_blocks, cut_pairs;
     int64_t analysis_us, block_sad_threshold;
     int32_t source_bits;
