@@ -107,12 +107,82 @@ inline std::vector<Point> points(const std::vector<float> &a,
     }
     return out;
 }
+// Refine a sparse corner match at nearby pixel positions. A corner detector
+// need not pick the same physical location in both pictures. Compare a
+// competing patch outside this neighbourhood to reject repeated detail.
+inline bool patch(const std::vector<float> &image, int w, int h, int x, int y, Point &p) {
+    if (x < 5 || y < 5 || x >= w - 5 || y >= h - 5) return false;
+    p.x = x; p.y = y;
+    float sum = 0, norm = 0; int k = 0;
+    for (int yy = y - 5; yy <= y + 5; yy += 2)
+        for (int xx = x - 5; xx <= x + 5; xx += 2) sum += (p.descriptor[k++] = image[yy * w + xx]);
+    for (auto &v : p.descriptor) { v -= sum / 36; norm += v * v; }
+    if (norm <= 100) return false;
+    norm = std::sqrt(norm);
+    for (auto &v : p.descriptor) v /= norm;
+    return true;
+}
+inline float patch_distance(const Point &a, const Point &b) {
+    float dot = 0;
+    for (int k = 0; k < 36; ++k) dot += a.descriptor[k] * b.descriptor[k];
+    return 1 - dot;
+}
+inline bool track(const Point &source, const std::vector<float> &target,
+                  const std::vector<Point> &corners, int w, int h, Point prediction, Point &found) {
+    std::vector<std::pair<float, Point>> candidates;
+    candidates.reserve(corners.size() + 99);
+    for (const auto &p : corners) candidates.emplace_back(patch_distance(source, p), p);
+    if (patch(target, w, h, prediction.x, prediction.y, prediction))
+        candidates.emplace_back(patch_distance(source, prediction), prediction);
+    std::partial_sort(candidates.begin(), candidates.begin() + 2, candidates.end(),
+                      [](const auto &a, const auto &b) { return a.first < b.first; });
+    Point seeds[2] = {candidates[0].second, candidates[1].second};
+    for (const auto &seed : seeds) for (int y = seed.y - 3; y <= seed.y + 3; ++y)
+        for (int x = seed.x - 3; x <= seed.x + 3; ++x) {
+            Point p{};
+            if (patch(target, w, h, x, y, p)) candidates.emplace_back(patch_distance(source, p), p);
+        }
+    auto best = std::min_element(candidates.begin(), candidates.end(),
+                                [](const auto &a, const auto &b) { return a.first < b.first; });
+    if (best->first >= .18f) return false;
+    found = best->second;
+    float second = 2;
+    for (const auto &c : candidates) {
+        int dx = c.second.x - found.x, dy = c.second.y - found.y;
+        if (dx * dx + dy * dy > 25) second = std::min(second, c.first);
+    }
+    return best->first < .65f * second;
+}
 // Feature correspondence is reserved for uncertain candidates. Weak-cut
 // recovery needs distinct detail; overturning a strong cut needs more matching
 // features. Ignore stationary matches: shared titles/borders are not continuity.
 enum class Correspondence { Unknown, Distinct, Moving };
+inline bool moving_matches(const std::vector<std::pair<Point, Point>> &matches, int required_matches) {
+    auto inliers = [&](size_t anchor, double cs, double sn) {
+        int count = 0; const auto &o = matches[anchor];
+        for (const auto &m : matches) {
+            double x = m.first.x - o.first.x, y = m.first.y - o.first.y;
+            double dx = cs * x - sn * y + o.second.x - m.second.x;
+            double dy = sn * x + cs * y + o.second.y - m.second.y;
+            count += dx * dx + dy * dy < 9;
+        }
+        return count;
+    };
+    for (size_t i = 0; i < matches.size(); ++i) {
+        if (inliers(i, 1, 0) >= required_matches) return true;
+        for (size_t j = 0; j < i; ++j) {
+            double x = matches[i].first.x - matches[j].first.x, y = matches[i].first.y - matches[j].first.y;
+            double u = matches[i].second.x - matches[j].second.x, v = matches[i].second.y - matches[j].second.y;
+            double d = x * x + y * y;
+            if (d < 25) continue;
+            double cs = (x * u + y * v) / d, sn = (x * v - y * u) / d, scale = cs * cs + sn * sn;
+            if (scale > .25 && scale < 4 && inliers(i, cs, sn) >= required_matches) return true;
+        }
+    }
+    return false;
+}
 inline Correspondence correspondence(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b,
-                                     int required_matches, bool finer = false) {
+                                     int required_matches, bool finer = false, const VECTOR *vectors = nullptr) {
     int max_w = finer ? 240 : 120, max_h = finer ? 135 : 68;
     int w = std::min(max_w, a.width), h = std::max(1, std::min(a.height, (a.height * w + a.width / 2) / a.width));
     if (h > max_h) { w = std::max(1, w * max_h / h); h = max_h; }
@@ -140,26 +210,25 @@ inline Correspondence correspondence(const ajn_mvtools_frame &a, const ajn_mvtoo
         int dx = pb[at].x - pa[i].x, dy = pb[at].y - pa[i].y;
         if (mutual && dx * dx + dy * dy > 6.25) matches.emplace_back(pa[i], pb[at]);
     }
-    auto inliers = [&](size_t anchor, double cs, double sn) {
-        int count = 0; const auto &o = matches[anchor];
-        for (const auto &m : matches) {
-            double x = m.first.x - o.first.x, y = m.first.y - o.first.y;
-            double dx = cs * x - sn * y + o.second.x - m.second.x;
-            double dy = sn * x + cs * y + o.second.y - m.second.y;
-            count += dx * dx + dy * dy < 9;
+    if (moving_matches(matches, required_matches)) return Correspondence::Moving;
+    if (vectors) {
+        // Only the fine, uncertain-motion path performs dense patch tracking.
+        // Keep exact corner matches above; require reciprocal tracks for new
+        // evidence so a one-way match on a flat edge cannot establish motion.
+        matches.clear();
+        int nx = a.width / 8, ny = a.height / 8;
+        for (const auto &p : pa) {
+            int x = p.x * a.width / w, y = p.y * a.height / h;
+            const auto &v = vectors[std::min(y / 8, ny - 1) * nx + std::min(x / 8, nx - 1)];
+            Point predicted{p.x + v.x * w / a.width, p.y + v.y * h / a.height, {}}, to{}, back{};
+            if (!track(p, tb, pb, w, h, predicted, to)) continue;
+            int dx = to.x - p.x, dy = to.y - p.y;
+            if (dx * dx + dy * dy <= 6.25) continue;
+            if (!track(to, ta, pa, w, h, p, back)) continue;
+            dx = back.x - p.x; dy = back.y - p.y;
+            if (dx * dx + dy * dy <= 4) matches.emplace_back(p, to);
         }
-        return count;
-    };
-    for (size_t i = 0; i < matches.size(); ++i) {
-        if (inliers(i, 1, 0) >= required_matches) return Correspondence::Moving;
-        for (size_t j = 0; j < i; ++j) {
-            double x = matches[i].first.x - matches[j].first.x, y = matches[i].first.y - matches[j].first.y;
-            double u = matches[i].second.x - matches[j].second.x, v = matches[i].second.y - matches[j].second.y;
-            double d = x * x + y * y;
-            if (d < 25) continue;
-            double cs = (x * u + y * v) / d, sn = (x * v - y * u) / d, scale = cs * cs + sn * sn;
-            if (scale > .25 && scale < 4 && inliers(i, cs, sn) >= required_matches) return Correspondence::Moving;
-        }
+        if (moving_matches(matches, required_matches)) return Correspondence::Moving;
     }
     return Correspondence::Distinct;
 }

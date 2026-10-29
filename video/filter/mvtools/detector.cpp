@@ -184,7 +184,7 @@ int ajn_mvtools_analyze_enhanced(void *context, const ajn_mvtools_frame *a,
             // ongoing motion; abrupt edits need the stronger coarse evidence.
             if (!continuous && spatial > .5 && aligned > .85 &&
                 raw <= 2 * old_raw && residual <= 2 * old_residual)
-                continuous = enhanced::correspondence(*a, *b, 8, true) == enhanced::Correspondence::Moving;
+                continuous = enhanced::correspondence(*a, *b, 8, true, d.motion->gop.planes[0]->vectors) == enhanced::Correspondence::Moving;
         }
         // Shared borders or a similar palette can mask an abrupt edit. Do not
         // override the original decision without actual feature continuity.

@@ -28,6 +28,31 @@ static void corner_order() {
         require(points[i].x == 6 + 5 * (i % 4) && points[i].y == 6 + 5 * (i / 4),
                 "equal-strength corners must retain row-major selection order");
 }
+static void patch_tracking() {
+    // The destination corner is displaced from the physical patch centre.
+    // Local refinement must recover the translation despite illumination,
+    // then reject an equally good copy elsewhere in the picture.
+    constexpr int w = 96, h = 80;
+    std::vector<float> a(w * h), b(w * h);
+    uint32_t random = 17;
+    for (auto &v : a) {
+        random = random * 1664525u + 1013904223u;
+        v = float(20 + (random >> 24) / 2);
+    }
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
+        b[y * w + x] = a[std::max(0, y - 2) * w + std::max(0, x - 7)] + 25;
+    enhanced::Point source{}, seed{}, other{}, found{};
+    require(enhanced::patch(a, w, h, 32, 32, source) &&
+            enhanced::patch(b, w, h, 37, 33, seed) &&
+            enhanced::patch(b, w, h, 70, 34, other), "tracking fixture has textured patches");
+    require(enhanced::track(source, b, {seed, other}, w, h, seed, found) &&
+            found.x == 39 && found.y == 34, "track the physical patch beyond the selected corner");
+    for (int y = -5; y <= 5; ++y) for (int x = -5; x <= 5; ++x)
+        b[(34 + y) * w + 70 + x] = b[(34 + y) * w + 39 + x];
+    enhanced::patch(b, w, h, 70, 34, other);
+    require(!enhanced::track(source, b, {seed, other}, w, h, seed, found),
+            "equally good repeated patches cannot establish a confident track");
+}
 static void kernels_match() {
     // Every block shape used by 8x8 analysis and its chroma planes. Source
     // blocks are packed by Analyse; reference rows have their own stride.
@@ -158,6 +183,7 @@ static void enhanced_cuts() {
 }
 int main(int argc, char **argv) {
     corner_order();
+    patch_tracking();
     kernels_match();
     enhanced_cuts();
     void *d = ajn_mvtools_create(); require(d, "create");
