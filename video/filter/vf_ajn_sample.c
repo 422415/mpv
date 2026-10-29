@@ -335,6 +335,13 @@ static void reset(struct mp_filter *f)
     p->last_submit = 0;
 }
 
+static bool command(struct mp_filter *f, struct mp_filter_command *cmd)
+{
+    if (cmd->type != MP_FILTER_COMMAND_TEXT || !cmd->cmd || strcmp(cmd->cmd, "invalidate")) return false;
+    reset(f);
+    return true;
+}
+
 static void cleanup(struct priv *p)
 {
 #if HAVE_CUDA_HWACCEL
@@ -372,7 +379,7 @@ static void destroy(struct mp_filter *f)
 
 static const struct mp_filter_info filter = {
     .name = "ajn-sample", .priv_size = sizeof(struct priv),
-    .process = process, .reset = reset, .destroy = destroy,
+    .process = process, .reset = reset, .destroy = destroy, .command = command,
 };
 
 static struct mp_filter *create(struct mp_filter *parent, void *options)
