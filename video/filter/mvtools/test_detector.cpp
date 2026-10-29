@@ -53,6 +53,32 @@ static void patch_tracking() {
     require(!enhanced::track(source, b, {seed, other}, w, h, seed, found),
             "equally good repeated patches cannot establish a confident track");
 }
+static void regional_motion() {
+    // Reciprocal tracks from the remaining head turn. The two eye regions
+    // agree locally, while mouth/hair outliers prevent one global motion.
+    const int head[][4] = {
+        {184,105,162,109},{168,128,170,95},{171,123,166,102},{166,20,132,44},
+        {204,33,173,42},{204,49,175,62},{196,60,160,78},{152,26,118,52},
+        {190,74,153,92},{191,25,154,42},{209,27,177,36},{152,41,163,88},
+        {168,97,133,45},{138,115,114,116},{168,14,136,38},{189,88,162,98},
+        {217,73,169,98},{135,45,184,23},{44,128,70,125},{136,110,112,111}
+    };
+    std::vector<std::pair<enhanced::Point, enhanced::Point>> matches;
+    for (const auto &m : head) matches.push_back({{m[0],m[1],{}},{m[2],m[3],{}}});
+    require(!enhanced::moving_matches(matches, 8) && enhanced::regional_matches(matches, 45),
+            "independent eye motions must confirm the deforming head turn");
+    const int cut[][4] = {
+        {191,112,228,35},{163,119,230,54},{161,109,227,37},{214,47,112,120},
+        {170,103,99,78},{158,51,233,7},{195,99,227,41}
+    };
+    matches.clear();
+    for (const auto &m : cut) matches.push_back({{m[0],m[1],{}},{m[2],m[3],{}}});
+    require(!enhanced::regional_matches(matches, 45), "nearby real edit has no agreeing regions");
+    matches.clear();
+    for (int i = 0; i < 8; ++i)
+        matches.push_back({{20 + i * 10,30,{}},{30 + i * 10,40,{}}});
+    require(!enhanced::regional_matches(matches, 45), "collinear edge tracks cannot establish regions");
+}
 static void kernels_match() {
     // Every block shape used by 8x8 analysis and its chroma planes. Source
     // blocks are packed by Analyse; reference rows have their own stride.
@@ -184,6 +210,7 @@ static void enhanced_cuts() {
 int main(int argc, char **argv) {
     corner_order();
     patch_tracking();
+    regional_motion();
     kernels_match();
     enhanced_cuts();
     void *d = ajn_mvtools_create(); require(d, "create");

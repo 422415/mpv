@@ -181,6 +181,59 @@ inline bool moving_matches(const std::vector<std::pair<Point, Point>> &matches, 
     }
     return false;
 }
+inline bool regional_matches(const std::vector<std::pair<Point, Point>> &matches,
+                             int radius) {
+    // Two independently verified regions can explain deformation that a
+    // single whole-picture similarity cannot. Each needs three non-collinear
+    // reciprocal tracks, without sharing evidence with the other region.
+    if (matches.size() < 6) return false;
+    struct Region { double x, y, u, v; std::vector<size_t> tracks; };
+    std::vector<Region> regions;
+    for (size_t i = 0; i < matches.size(); ++i) for (size_t j = 0; j < i; ++j) {
+        const auto &a = matches[i], &b = matches[j];
+        double x = b.first.x - a.first.x, y = b.first.y - a.first.y;
+        double u = b.second.x - a.second.x, v = b.second.y - a.second.y;
+        double distance = x * x + y * y;
+        if (distance < 25 || distance > radius * radius) continue;
+        double cs = (x * u + y * v) / distance, sn = (x * v - y * u) / distance;
+        double scale = cs * cs + sn * sn;
+        if (scale <= .25 || scale >= 4) continue;
+        Region region{};
+        bool area = false;
+        for (size_t k = 0; k < matches.size(); ++k) {
+            const auto &m = matches[k];
+            double px = m.first.x - a.first.x, py = m.first.y - a.first.y;
+            if (px * px + py * py > radius * radius) continue;
+            double dx = cs * px - sn * py + a.second.x - m.second.x;
+            double dy = sn * px + cs * py + a.second.y - m.second.y;
+            if (dx * dx + dy * dy >= 9) continue;
+            region.tracks.push_back(k);
+            region.x += m.first.x; region.y += m.first.y;
+            region.u += m.second.x; region.v += m.second.y;
+            // Similar patches along one straight edge are insufficient.
+            double cross = x * py - y * px;
+            area |= cross * cross > 6.25 * distance;
+        }
+        if (region.tracks.size() < 3 || !area) continue;
+        region.x /= region.tracks.size(); region.y /= region.tracks.size();
+        region.u /= region.tracks.size(); region.v /= region.tracks.size();
+        for (const auto &other : regions) {
+            double dx = region.x - other.x, dy = region.y - other.y;
+            double du = region.u - other.u, dv = region.v - other.v;
+            double separation = dx * dx + dy * dy;
+            if (separation < 24 * 24 || du * du + dv * dv < 24 * 24) continue;
+            // Independent parts may deform, but must retain their layout:
+            // relative displacement stays below half their separation.
+            if ((du - dx) * (du - dx) + (dv - dy) * (dv - dy) > .25 * separation) continue;
+            bool shared = false;
+            for (size_t k : region.tracks)
+                shared |= std::find(other.tracks.begin(), other.tracks.end(), k) != other.tracks.end();
+            if (!shared) return true;
+        }
+        regions.push_back(std::move(region));
+    }
+    return false;
+}
 inline Correspondence correspondence(const ajn_mvtools_frame &a, const ajn_mvtools_frame &b,
                                      int required_matches, bool finer = false, const VECTOR *vectors = nullptr) {
     int max_w = finer ? 240 : 120, max_h = finer ? 135 : 68;
@@ -229,6 +282,11 @@ inline Correspondence correspondence(const ajn_mvtools_frame &a, const ajn_mvtoo
             if (dx * dx + dy * dy <= 4) matches.emplace_back(p, to);
         }
         if (moving_matches(matches, required_matches)) return Correspondence::Moving;
+        // A deforming face can have several local motions. Use only reciprocal
+        // tracks, with non-collinear neighbours confirming each local model.
+        // The caller still requires aligned, ongoing motion before this path.
+        if (regional_matches(matches, std::min(w, h) / 3))
+            return Correspondence::Moving;
     }
     return Correspondence::Distinct;
 }
