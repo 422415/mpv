@@ -32,7 +32,6 @@ jobs:
           EOF
           i686-w64-mingw32-gcc-posix sanitycheckc.c -o sanitycheckc_cross.exe -O2 -pipe -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0a00 -fstack-protector-strong -lole32
           wine --version
-          ls -l /usr/lib/wine
           result=0
           WINEDEBUG=+loaddll wine ./sanitycheckc_cross.exe >wine-current.log 2>&1 || result=$?
           cat wine-current.log
