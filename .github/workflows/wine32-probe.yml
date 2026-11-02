@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      WINEPREFIX: /tmp/wine
+      WINEPREFIX: ${{ runner.temp }}/wine
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Install the same compiler and Wine packages
