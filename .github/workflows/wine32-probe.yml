@@ -59,6 +59,28 @@ jobs:
           meson wrap install mujs
           meson subprojects download
 
+      - name: Verify standard format checking before the full build
+        shell: bash
+        run: |
+          cat >"$RUNNER_TEMP/printf-check.c" <<'EOF'
+          #include <stdio.h>
+          void check(size_t n) {
+          #ifdef BAD_FORMAT
+              fprintf(stderr, "%zu\n", (char *)0);
+          #else
+              fprintf(stderr, "%zu\n", n);
+          #endif
+          }
+          EOF
+          flags=(-std=c11 -U__STRICT_ANSI__ -O2 -Wall -Werror=format
+                 -D_FORTIFY_SOURCE=3 -D__USE_MINGW_ANSI_STDIO=1 -fno-builtin-fprintf)
+          i686-w64-mingw32-gcc-posix "${flags[@]}" -fsyntax-only "$RUNNER_TEMP/printf-check.c"
+          if i686-w64-mingw32-gcc-posix "${flags[@]}" -DBAD_FORMAT -fsyntax-only "$RUNNER_TEMP/printf-check.c" >"$RUNNER_TEMP/invalid-format.log" 2>&1; then
+              echo "Invalid format argument was not rejected"
+              exit 1
+          fi
+          echo "C99 format accepted; invalid argument rejected."
+
       - name: Build libraries
         run: |
           ./ci/build-mingw64.sh
