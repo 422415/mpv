@@ -4,7 +4,7 @@ on:
     branches: [ci/ajn-wine32-probe]
 jobs:
   probe:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
       WINEPREFIX: /tmp/wine
@@ -21,9 +21,16 @@ jobs:
           mkdir -p "$WINEPREFIX"
           export WINEPATH="$(i686-w64-mingw32-gcc-posix -print-file-name=);/usr/i686-w64-mingw32/lib"
           cat >sanitycheckc.c <<'EOF'
-          int main(void) { int class = 0; return class; }
+          #include <windows.h>
+          #include <objbase.h>
+          int main(void) {
+              CO_MTA_USAGE_COOKIE cookie;
+              HRESULT hr = CoIncrementMTAUsage(&cookie);
+              if (FAILED(hr)) return 1;
+              return FAILED(CoDecrementMTAUsage(cookie));
+          }
           EOF
-          i686-w64-mingw32-gcc-posix sanitycheckc.c -o sanitycheckc_cross.exe -O2 -pipe -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_FILE_OFFSET_BITS=64 -fstack-protector-strong
+          i686-w64-mingw32-gcc-posix sanitycheckc.c -o sanitycheckc_cross.exe -O2 -pipe -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0a00 -fstack-protector-strong -lole32
           wine --version
           ls -l /usr/lib/wine
           result=0
