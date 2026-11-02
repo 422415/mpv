@@ -1,38 +1,112 @@
-name: Wine32 compiler probe
+name: Wine32 full verification
 on:
   push:
     branches: [ci/ajn-wine32-probe]
 jobs:
-  probe:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
+  mingw:
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
     env:
       WINEPREFIX: /tmp/wine
-      DEBIAN_FRONTEND: noninteractive
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      DOWNLOAD_CACHE: ${{ github.workspace }}/.ccache/downloads
+      TARGET: ${{ matrix.arch }}-w64-mingw32
+      RUST_TARGET: ${{ matrix.arch }}-pc-windows-gnu
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: i686
+            # 32-bit Wine's socket calls fail inside the hosted container.
+            # Keep its execution tests on the VM with the LTS package set.
+            runner: ubuntu-26.04
+            container: ''
+            wine: wine32
     steps:
-      - name: Install the same compiler and Wine packages
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y g++-mingw-w64 gcc-multilib wine32 wine
-      - name: Run the compiler sanity check directly
+      - name: Install dependencies
         shell: bash
         run: |
+          install_cmd=()
+          if [ "$(id -u)" -ne 0 ]; then install_cmd=(sudo); fi
+          "${install_cmd[@]}" dpkg --add-architecture i386
+          "${install_cmd[@]}" apt-get update
+          "${install_cmd[@]}" apt-get install --no-install-recommends -y ca-certificates ccache cmake g++-mingw-w64 gcc-multilib git make meson nasm ninja-build pkgconf rustup wget xz-utils ${{ matrix.wine }} wine
+          rustup default stable
+          rustup target add ${{ env.RUST_TARGET }}
+          # Wine requires an existing prefix to belong to its current user.
           mkdir -p "$WINEPREFIX"
-          export WINEPATH="$(i686-w64-mingw32-gcc-posix -print-file-name=);/usr/i686-w64-mingw32/lib"
-          cat >sanitycheckc.c <<'EOF'
-          #include <windows.h>
-          #include <objbase.h>
-          int main(void) {
-              CO_MTA_USAGE_COOKIE cookie;
-              HRESULT hr = CoIncrementMTAUsage(&cookie);
-              if (FAILED(hr)) return 1;
-              return FAILED(CoDecrementMTAUsage(cookie));
-          }
-          EOF
-          i686-w64-mingw32-gcc-posix sanitycheckc.c -o sanitycheckc_cross.exe -O2 -pipe -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0a00 -fstack-protector-strong -lole32
-          wine --version
-          result=0
-          WINEDEBUG=+loaddll wine ./sanitycheckc_cross.exe >wine-current.log 2>&1 || result=$?
-          cat wine-current.log
-          exit "$result"
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - uses: actions/checkout@v7
+
+      - name: Get time
+        id: get_time
+        run: echo "timestamp=`date +%s%N`" >> $GITHUB_OUTPUT
+
+      - name: Restore cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.TARGET }}-${{ steps.get_time.outputs.timestamp }}
+          restore-keys: ${{ env.TARGET }}-
+
+      - name: Install Meson Wraps
+        run: |
+          mkdir subprojects -p
+          meson wrap install mujs
+          meson subprojects download
+
+      - name: Build libraries
+        run: |
+          ./ci/build-mingw64.sh
+
+      - name: Build with meson
+        id: build
+        run: |
+          ./ci/build-mingw64.sh meson pack
+
+      - name: Print meson log
+        if: ${{ failure() && steps.build.outcome == 'failure' }}
+        run: |
+          cat ./mingw_build/meson-logs/meson-log.txt
+
+      - name: Functional test
+        run: |
+          cd artifact && wine ./mpv.com -v --no-config
+        env:
+          WINEDEBUG: '+loaddll'
+
+      - name: Run meson tests
+        id: tests
+        run: |
+          # Dynamically loaded libmpv tests do not inherit Meson's DLL search paths.
+          export WINEPATH="$(winepath -w "$PWD/artifact")"
+          meson test -C mingw_build
+
+      - name: Print meson test log
+        if: ${{ failure() && steps.tests.outcome == 'failure' }}
+        run: |
+          cat ./mingw_build/meson-logs/testlog.txt
+
+      - name: Artifact name
+        id: artifact
+        run: |
+          VERSION_FILE=$(find . -path "*/common/version.h" -type f | head -n 1)
+          VER=$(grep VERSION "$VERSION_FILE" | cut -d'"' -f2)
+          PR=${{ github.event.pull_request.number && format('-pr{0}', github.event.pull_request.number) || '' }}
+          echo "name=mpv-$VER$PR-${{ github.run_id }}-$TARGET" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: artifact/*
+
+      - name: Save Cache
+        uses: actions/cache/save@v6
+        if: always()
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.TARGET }}-${{ steps.get_time.outputs.timestamp }}
