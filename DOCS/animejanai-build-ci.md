@@ -146,11 +146,18 @@ failures are not blanket exemptions:
   builds retain the individual declaration checks.
 - CUDA builds require nv-codec-headers 11.1.5.3 or newer for `cuStreamWaitEvent`.
   MSVC uses the portable release's 13.0.19.0 headers instead of WrapDB's older fallback.
-- The i686 Wine job runs directly on the Ubuntu 24.04 VM. Its 32-bit socket calls fail
+- The i686 Wine job runs directly on the Ubuntu 26.04 VM. Its 32-bit socket calls fail
   in the hosted container before mpv runs; installing both Wine loaders did not fix that.
-  The LTS package set also avoids 26.10's conflicting i386/amd64 libgphoto2 files.
+  This LTS has MinGW 13's 32-bit `ole32` imports for `CoIncrementMTAUsage` and
+  `CoDecrementMTAUsage`; Ubuntu 24.04's MinGW 11 cannot link the WASAPI backend.
+  The GCC cross-build selects MinGW's C99 stdio explicitly so `%zu` remains valid
+  with GCC 13 and newer MinGW headers; format warnings remain errors.
+  Setup creates the Wine prefix as its current user. Wine will not create it beneath
+  another user's directory, such as `/tmp` on the VM or the container's mounted workspace.
 - CUDA-only callbacks are compiled with their callers, and standalone addon tests keep
   their assertions enabled even in release builds.
+- The D3D11 sample helper includes `d3d10_1.h` before the D3D11 header, as required by
+  the Windows SDK's SAL declarations; MinGW's headers alone do not catch this error.
 - The Xcode 27 runner rebuilds libarchive from source: its preinstalled dylib targets
   macOS 27.2 while the runner SDK targets 27.0. Linker warnings remain errors.
 - The scene test stages MVTools beside its executable; the Wine reload test uses the
