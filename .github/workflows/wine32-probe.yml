@@ -1,0 +1,31 @@
+name: Wine32 compiler probe
+on:
+  push:
+    branches: [ci/ajn-wine32-probe]
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      WINEPREFIX: /tmp/wine
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install the same compiler and Wine packages
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y g++-mingw-w64 gcc-multilib wine32 wine
+      - name: Run the compiler sanity check directly
+        shell: bash
+        run: |
+          export WINEPATH="$(i686-w64-mingw32-gcc-posix -print-file-name=);/usr/i686-w64-mingw32/lib"
+          cat >sanitycheckc.c <<'EOF'
+          int main(void) { int class = 0; return class; }
+          EOF
+          i686-w64-mingw32-gcc-posix sanitycheckc.c -o sanitycheckc_cross.exe -O2 -pipe -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_FILE_OFFSET_BITS=64 -fstack-protector-strong
+          wine --version
+          ls -l /usr/lib/wine
+          result=0
+          WINEDEBUG=+loaddll wine ./sanitycheckc_cross.exe >wine-current.log 2>&1 || result=$?
+          cat wine-current.log
+          exit "$result"
